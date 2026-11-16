@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>铁锈地图制作 · 属性与指令速查</title>
+<style>
+  :root{
+    --bg:#1e1e1e; --panel:#2b2b2b; --bar:#333333; --card:#252525;
+    --line:#3d3d3d; --text:#e6e6e6; --muted:#9aa2ac; --accent:#2f86dc;
+    --warn:#e0a44a; --ok:#6cbf84; --bad:#e07373; --code:#171717;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:"Microsoft YaHei","Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.6}
+  header{background:var(--bar);border-bottom:1px solid var(--line);padding:18px 24px 14px;position:sticky;top:0;z-index:5}
+  h1{margin:0 0 4px;font-size:19px;font-weight:700;letter-spacing:.5px}
+  .sub{color:var(--muted);font-size:12px}
+  .sub b{color:var(--accent);font-weight:600}
+  .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}
+  #q{flex:1;min-width:220px;background:var(--code);border:1px solid var(--line);border-radius:6px;
+     color:var(--text);padding:9px 12px;font-size:14px;outline:none}
+  #q:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(47,134,220,.2)}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 0}
+  .tab{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:14px;
+       padding:4px 12px;cursor:pointer;font-size:12px}
+  .tab:hover{border-color:var(--accent);color:var(--text)}
+  .tab.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  main{padding:18px 24px 60px;max-width:1500px;margin:0 auto}
+  #count{color:var(--muted);font-size:12px;margin-bottom:12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+  .card:hover{border-color:#555}
+  .top{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .name{font-family:Consolas,"Cascadia Mono",monospace;font-size:14px;font-weight:700;color:#8ec5ff}
+  .badge{font-size:10px;padding:1px 7px;border-radius:9px;border:1px solid var(--line);color:var(--muted)}
+  .badge.cmd{color:#c9a7ff;border-color:#5b4a7a}
+  .badge.tile{color:var(--ok);border-color:#3d6b48}
+  .badge.pit{color:var(--bad);border-color:#7a4141}
+  .badge.auto{color:var(--warn);border-color:#7a6131}
+  .desc{font-size:13px;margin:2px 0 8px}
+  .kv{font-size:12px;color:var(--muted);display:flex;gap:6px;margin-top:3px}
+  .kv span:first-child{color:#7f8892;min-width:34px;flex-shrink:0}
+  code{background:var(--code);border:1px solid var(--line);border-radius:3px;padding:1px 5px;
+       font-family:Consolas,monospace;font-size:12px;color:#f0c987}
+  .src{font-size:10px;color:#6f7780;margin-top:8px;border-top:1px dashed var(--line);padding-top:6px}
+  .empty{color:var(--muted);padding:40px;text-align:center}
+  footer{color:#6f7780;font-size:11px;text-align:center;padding:0 24px 30px}
+  kbd{background:var(--code);border:1px solid var(--line);border-radius:3px;padding:0 5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>铁锈地图制作 · 属性与指令速查 <span style="color:var(--accent);font-size:13px;font-weight:400">1.15</span></h1>
+  <div class="sub">数据来源：本机 <b>23 张有效 TMX</b>（24 个文件中 1 个坏 XML）+ 官方 readme / Wiki / 社区教程整理。完整版见 <code>docs/铁锈地图_属性与指令速查.md</code></div>
+  <div class="toolbar">
+    <input id="q" placeholder="搜索属性或指令，例如 spawnUnits / team / map_info / 错拼 …（按 / 聚焦）" autocomplete="off">
+    <span id="count"></span>
+  </div>
+  <div class="tabs" id="tabs"></div>
+</header>
+<main>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">没有匹配的条目，换个关键词试试。</div>
+</main>
+<footer>「指令」= Triggers 对象层的 type/name；游戏内聊天指令、单位 ini 脚本不在本表。按 <kbd>/</kbd> 搜索，<kbd>Esc</kbd> 清空。</footer>
+<script>
+const CATS = {
+  map:   {label:"地图/图层", cls:""},
+  tile:  {label:"图块属性", cls:"tile"},
+  cmd:   {label:"触发指令", cls:"cmd"},
+  param: {label:"调度参数", cls:""},
+  syn:   {label:"语法/取值", cls:"auto"},
+  auto:  {label:"自动映射", cls:"auto"},
+  pit:   {label:"易错/坑", cls:"pit"}
+};
+// n=名称 c=类别 d=说明 v=取值 f=实测频次 s=来源
+const DATA = [
+ // 地图 / 图层
+ {n:"<map> 根属性",c:"map",d:"地图尺寸与瓦片规格；游戏只认正交 20×20 图集。",v:"width / height / tilewidth=20 / tileheight=20 / orientation=orthogonal / renderorder=right-down",f:"24 张图全为 20×20",s:"本机实测 + 官方示例"},
+ {n:"Tile Layer Format",c:"map",d:"Tiled 导出设置，格式不对游戏读不出图层。",v:"Base64 (gzip compressed)",s:"Rusted Warfare Wiki"},
+ {n:"embedded_png",c:"map",d:"图集自定义属性，把图片 base64 嵌进 .tsx，便于分发单个 tmx。",v:"图片 base64 字符串",s:"铁锈战争百科"},
+ {n:"地图自定义属性",c:"map",d:"tag/fill/sw1..sw6/author 等，是作者或工具留的备注，游戏不读。",v:"tag=RW、fill、sw1…sw6、author",f:"11~15 张社区图",s:"本机实测（官方示例无）"},
+ {n:"Ground",c:"map",d:"地形瓦片层，必须填满；开自动映射时不要手改，会被覆盖。",v:"瓦片层",f:"23 张",s:"官方 custom_maps_readme.txt"},
+ {n:"Items",c:"map",d:"资源池/树/石头；资源池必须放这层。禁止放地形瓦片，否则寻路失效。",v:"瓦片层",f:"23 张",s:"官方 readme"},
+ {n:"Units",c:"map",d:"起始单位与建筑；其它东西放这层会被忽略。",v:"瓦片层",f:"18 张",s:"官方 readme"},
+ {n:"Triggers",c:"map",d:"对象层，放地图设置、玩家统计、事件指令。对象矩形位置多数无意义。",v:"对象层",f:"15 张（+4 张小写 triggers）",s:"官方 readme"},
+ {n:"set",c:"map",d:"游戏完全忽略，仅供 Tiled 自动映射当输入；基础地形标记画在这层。",v:"瓦片层",f:"3 张 set + 3 张 Set",s:"官方 readme"},
+ {n:"UnitObjects",c:"map",d:"对象形式的单位，对象上写 unit + team。",v:"对象层",f:"8 张",s:"本机实测"},
+ {n:"PathingOverride",c:"map",d:"社区提到的寻路覆盖层；官方图零命中，本项目按只读保真处理。",v:"瓦片层",f:"0 张",s:"config/layer_rules.json"},
+ // 图块属性
+ {n:"water",c:"tile",d:"水面，陆地单位不可通行。值留空即生效。",v:"空值",f:"845",s:"官方示例 + 实测"},
+ {n:"large-cliff",c:"tile",d:"大悬崖。常见错拼 large-clift。",v:"空值",f:"787",s:"实测"},
+ {n:"lava-cliff",c:"tile",d:"岩浆崖。",v:"空值",f:"506",s:"实测"},
+ {n:"water-bridge",c:"tile",d:"可通行的桥/浅水桥；项目 known 列表尚未收录。",v:"空值",f:"447",s:"实测"},
+ {n:"block-land",c:"tile",d:"阻挡陆地单位。",v:"空值",f:"396",s:"实测"},
+ {n:"cliff-soft",c:"tile",d:"软悬崖；有 24 次写成带前导空格的 ' cliff-soft'，会失效。",v:"空值",f:"344 + 24",s:"实测"},
+ {n:"large-rock / small-rock",c:"tile",d:"岩石装饰。",v:"空值",f:"160 / 15",s:"官方示例 + 实测"},
+ {n:"cliff / lava",c:"tile",d:"悬崖 / 岩浆。",v:"空值",f:"60 / 32",s:"实测"},
+ {n:"res_pool",c:"tile",d:"资源池（矿）。官方图 9 格是一个整体，摆放时整块 3×3 选中。",v:"空值",f:"22",s:"官方图集 + Wiki"},
+ {n:"tree",c:"tile",d:"树。",v:"空值",f:"20",s:"官方示例"},
+ {n:"unit",c:"tile",d:"该图块代表的单位 raw name；来自 units.tsx 的 tile 属性。",v:"builder / tank / commandCenter …",f:"16317",s:"units.tsx + rw/units.py"},
+ {n:"team",c:"tile",d:"图块所属队伍；改 team 即可换单位颜色。",v:"0~14 / -1 / -2 / none",f:"16317",s:"units.tsx + 实测"},
+ {n:"type（图块）",c:"tile",d:"图集/单位版本标记，多见于图集定义。",v:"1.0 / 1.1 / 1.2",f:"95",s:"实测"},
+ // 指令
+ {n:"unitAdd",c:"cmd",d:"刷兵 / 生成单位，最常用的指令。",v:"spawnUnits, team, warmup, repeatDelay",f:"8997 个对象",s:"实测 + 教程"},
+ {n:"unitDetect",c:"cmd",d:"检测区域内单位数量，满足条件后激活。",v:"unitType, minUnits, maxUnits, team, alsoActivate",f:"3008",s:"实测 + 教程"},
+ {n:"mapText",c:"cmd",d:"在地图上显示文字。",v:"text, textColor, textSize, showOnMap",f:"1451",s:"实测 + 教程"},
+ {n:"unitRemove",c:"cmd",d:"移除单位。",v:"team, activatedBy, resetActivationAfter",f:"1062",s:"实测"},
+ {n:"changeCredits",c:"cmd",d:"修改某队资金：add 为增量，set 为设值，可为负数。",v:"add / set, team",f:"828",s:"实测"},
+ {n:"move",c:"cmd",d:"让某队单位移动到 point 对象处。",v:"target（point 的 name）, team, delay",f:"306",s:"实测 + 教程"},
+ {n:"basic",c:"cmd",d:"通用事件 / 全局播报。",v:"globalMessage, id, 调度参数",f:"230",s:"实测"},
+ {n:"point",c:"cmd",d:"坐标锚点，给 move 的 target 引用；只需设置对象 name。",v:"name",f:"212",s:"实测 + 教程"},
+ {n:"team_info",c:"cmd",d:"队伍配置（对象名通常 team_0_info、team_1_info…）。",v:"team, credits, allyGroup, ai, lockAiDifficulty, disabledAI",f:"17",s:"实测 + Mapping Reference"},
+ {n:"moveCamera",c:"cmd",d:"移动镜头。",v:"delay, activatedBy",f:"8",s:"实测 + 教程"},
+ {n:"map_info",c:"cmd",d:"按 name 匹配的地图全局配置对象，缺 type 可能没有胜利提示。",v:"type, introText, fog, winCondition, loseCondition, shareFogWithAllies",f:"16~18 张图",s:"官方 example_mission + Wiki"},
+ {n:"camera_start",c:"cmd",d:"按 name 匹配，开局镜头位置（对象坐标有意义）。",v:"无需属性",s:"教程"},
+ {n:"camera_pan_#",c:"cmd",d:"开场镜头平移，index 决定顺序。",v:"index",s:"Mapping Reference"},
+ {n:"attack_point",c:"cmd",d:"生存/无尽模式进攻点。",v:"无需属性",s:"Mapping Reference"},
+ {n:"rotate_units",c:"cmd",d:"起始单位旋转角度。",v:"dir（度）",s:"Mapping Reference"},
+ // map_info 取值
+ {n:"type（map_info）",c:"syn",d:"地图类型，小写。不写可能没有胜利提示。",v:"skirmish / mission / survival / challenge / endless",f:"18",s:"实测 + Wiki"},
+ {n:"fog",c:"syn",d:"战争迷雾模式。",v:"map（探索永久可见）/ los（视线雾）/ NONE 或留空",f:"4",s:"官方示例 + 教程"},
+ {n:"winCondition",c:"syn",d:"胜利条件；留空 = 最后存活者胜。",v:"none / commandCenter / mainBuildings / allBuildings / allUnitsAndBuildings",f:"15",s:"实测 + Wiki"},
+ {n:"loseCondition",c:"syn",d:"失败条件，生存图常用。",v:"同 winCondition",f:"5",s:"实测 + Wiki"},
+ {n:"introText",c:"syn",d:"开局简报文字，\\n 换行。",v:"任意文本",f:"16",s:"实测 + 教程"},
+ {n:"credits",c:"syn",d:"队伍初始资金。",v:"整数（可负）",f:"3",s:"官方示例"},
+ {n:"allyGroup / ai / lockAiDifficulty",c:"syn",d:"结盟组 / AI 类型 / 锁定 AI 难度。",v:"数字 / survival / 6",f:"10 / 5 / 4",s:"实测 + 教程"},
+ // 调度参数
+ {n:"warmup",c:"param",d:"开局（或被触发后）多久生效。",v:"30s / 0.1s / 150s",f:"7454",s:"实测 + 教程"},
+ {n:"resetActivationAfter",c:"param",d:"触发后多久复位，可再次触发。",v:"0.5s / 300s",f:"7236",s:"实测"},
+ {n:"deactivatedBy",c:"param",d:"这些 id 激活时禁用本触发。",v:"逗号分隔 id，如 A,Q,W,C",f:"6305",s:"实测"},
+ {n:"activatedBy",c:"param",d:"由哪些触发/开关激活。",v:"逗号分隔 id",f:"5212",s:"实测 + 教程"},
+ {n:"repeatDelay",c:"param",d:"重复执行间隔。",v:"60s / 260s",f:"2536",s:"实测"},
+ {n:"delay",c:"param",d:"单次延迟。",v:"39s / 0.1s",f:"280+",s:"实测"},
+ {n:"allToActivate",c:"param",d:"activatedBy 里是否要全部满足才激活。",v:"true / false",f:"341",s:"实测 + 教程"},
+ {n:"alsoActivate",c:"param",d:"本触发激活时顺带激活谁。",v:"逗号分隔 id",f:"293",s:"实测 + 教程"},
+ {n:"id",c:"param",d:"本触发标识，供 activatedBy / alsoActivate / target 引用。",v:"数字或字符串",f:"2275",s:"实测"},
+ {n:"whenActivatedIds",c:"param",d:"激活后通知的 id。社区图常错拼成 whenActivatedlds。",v:"id 列表",f:"30",s:"实测"},
+ {n:"globalMessage",c:"param",d:"左上角全局播报文字。",v:"任意文本",f:"548",s:"实测 + 教程"},
+ {n:"globalMessage_delayPerChar",c:"param",d:"逐字显示速度。",v:"0.1s / 0.2s / slow",f:"486",s:"实测"},
+ {n:"globalMessage_textColor",c:"param",d:"播报颜色。",v:"red / #00FFFF …",f:"484",s:"实测"},
+ {n:"text / textColor / textSize",c:"param",d:"mapText 的文字 / 颜色 / 字号。",v:"文本 / 颜色 / 8~16",f:"1197 / 1196 / 1132",s:"实测"},
+ {n:"showOnMap",c:"param",d:"小地图/地图上可见。",v:"true",f:"12",s:"实测 + 教程"},
+ {n:"target",c:"param",d:"move 的目标 point 对象名。",v:"point 的 name",f:"306",s:"实测 + 教程"},
+ {n:"add / set",c:"param",d:"changeCredits 的增量 / 设值。",v:"整数（可负）",f:"663 / 85",s:"实测"},
+ {n:"minUnits / maxUnits",c:"param",d:"unitDetect 的数量区间。",v:"整数",f:"2364 / 528",s:"实测 + 教程"},
+ {n:"unitType",c:"param",d:"要检测/生成的单位 raw name，可逗号分隔多个。",v:"turret / bugSpore / repairbay …",f:"2632",s:"实测"},
+ {n:"includeIncomplete",c:"param",d:"unitDetect：把未建造完成的建筑也算进去。",v:"true",f:"1273",s:"实测"},
+ {n:"onlyMainBuildings",c:"param",d:"unitDetect：只算主要生产建筑。",v:"true",f:"22",s:"实测 + 教程"},
+ {n:"onlyOnResourcePool",c:"param",d:"unitDetect：只算建在资源池上的建筑。",v:"true",f:"18",s:"实测 + 教程"},
+ {n:"onlyBuilders",c:"param",d:"unitDetect：只算有建造能力的单位。",v:"true",f:"10",s:"实测 + 教程"},
+ {n:"onlyBuildings / onlyAttack",c:"param",d:"unitDetect：只算建筑 / 只算有攻击性的单位（本机零命中，教程列出）。",v:"true",f:"0",s:"教程"},
+ // 语法
+ {n:"时间值",c:"syn",d:"几乎所有时间参数都带 s 后缀，支持小数。",v:"0.02s / 30s / 720.2s",f:"18543 个值中 99% 以 s 结尾",s:"实测"},
+ {n:"布尔值",c:"syn",d:"小写字符串，不是 1/0。",v:"true / false",s:"实测"},
+ {n:"颜色值",c:"syn",d:"英文色名或十六进制。",v:"red / yellow / green / blue / white / purple / #87CEFA",f:"实测 top: red 545、yellow 481",s:"实测"},
+ {n:"列表值",c:"syn",d:"逗号分隔，不加空格。",v:"A,Q,W,C,E / heavyTank*10,bugMelee*6",s:"实测"},
+ {n:"team 特殊值",c:"syn",d:"-1 / -2 / none 在社区图大量出现，但官方未定义，项目配置标为 unverified。",v:"-1 (2615) / -2 (2603) / none (114)",f:"实测",s:"实测 + config/property_aliases.json"},
+ {n:"spawnUnits",c:"syn",d:"刷兵列表：单位名*数量，逗号分隔；单位名后可跟 (参数=值,…)。",v:"heavyTank*10, builder*2, turret(falling=true)",f:"9900（1528 个带括号参数）",s:"实测 + 教程"},
+ {n:"spawnChance",c:"syn",d:"spawnUnits 内联参数：生成概率。",v:"0.04",f:"1697",s:"社区实战"},
+ {n:"maxSpawnLimit",c:"syn",d:"spawnUnits 内联参数：该单位数量上限。",v:"1",f:"1692",s:"社区实战"},
+ {n:"offsetRandomX / offsetRandomY",c:"syn",d:"spawnUnits 内联参数：落点随机偏移。",v:"0 / 80 / 200",f:"1077 / 1054",s:"社区实战"},
+ {n:"falling",c:"syn",d:"spawnUnits 内联参数：从空中掉落入场。",v:"true",f:"953",s:"社区实战"},
+ {n:"offsetHeight / offsetRandomXY",c:"syn",d:"spawnUnits 内联参数：生成高度 / X·Y 一起随机偏移。",v:"100000 / 200",f:"194 / 190",s:"社区实战"},
+ {n:"techLevel / neutralTeam / offsetDir / gridAlign",c:"syn",d:"spawnUnits 其余内联参数（科技等级 / 中立队伍 / 朝向 / 网格对齐）。",v:"数字或布尔",f:"112 / 60 / 32 / 17",s:"社区实战"},
+ // 自动映射
+ {n:"rules.txt",c:"auto",d:"官方自动映射入口，只有三行，指向 ruleset1~3.tmx。",v:"./rules/ruleset1.tmx …",s:"<游戏目录1.15>/mods/maps/rules.txt"},
+ {n:"AutomappingRadius",c:"auto",d:"规则图属性：重算窗口外扩格数。",v:"2",f:"2",s:"ruleset*.tmx 实测"},
+ {n:"DeleteTiles",c:"auto",d:"规则图属性：重算前是否清旧输出。",v:"1",f:"2",s:"ruleset*.tmx 实测"},
+ {n:"规则图层命名",c:"auto",d:"条件层 input_* / inputnot_*，输出层 output_* / rule_*，区域 regions。",v:"input_set, inputnot_set_decoration, output_Ground, output_Items, regions",s:"ruleset*.tmx 实测"},
+ {n:"过渡瓦片来源",c:"auto",d:"岸线/浅滩不是算法画的，是规则图 output_Ground 里的 gid。",v:"例如草/水 2×2 规则输出 gid 824",s:"rwmap/rw/automapping.py"},
+ // 易错
+ {n:"mainBuilings",c:"pit",d:"官方 example_mission.tmx 自己就拼错了，别照抄。",v:"应为 mainBuildings",s:"官方示例"},
+ {n:"whenActivatedlds",c:"pit",d:"小写 l 冒充大写 I，社区图高频错拼。",v:"应为 whenActivatedIds",f:"210",s:"实测"},
+ {n:"activetedBy",c:"pit",d:"字母顺序错拼。",v:"应为 activatedBy",f:"52",s:"实测"},
+ {n:"loseConditions",c:"pit",d:"多写了复数 s。",v:"应为 loseCondition",f:"7",s:"实测"},
+ {n:"skimish",c:"pit",d:"地图类型拼错。",v:"应为 skirmish",f:"2",s:"实测"},
+ {n:"large-clift",c:"pit",d:"图块属性错拼，项目 property_aliases.json 已做归一。",v:"应为 large-cliff",f:"6",s:"实测 + 项目配置"},
+ {n:"' cliff-soft'（前导空格）",c:"pit",d:"属性名带前导空格，游戏不会匹配。",v:"应为 cliff-soft",f:"24",s:"实测"},
+ {n:"unutAdd / unitadd / unitunitAddAdd",c:"pit",d:"type 大小写或重复拼写错误。",v:"应为 unitAdd",f:"7",s:"实测"},
+ {n:"mapTetx / maptText",c:"pit",d:"type 拼写错误。",v:"应为 mapText",f:"2",s:"实测"},
+ {n:"Set / triggers（层名）",c:"pit",d:"层名大小写不一致，游戏按标准名识别。",v:"set / Triggers",f:"3 / 4",s:"实测"},
+ {n:"Ground 未填满",c:"pit",d:"地形层必须填满；资源池必须整块 3×3 放 Items。",v:"—",s:"官方 readme + Wiki"},
+ {n:"set 层当最终地形",c:"pit",d:"set 层游戏完全忽略，只是自动映射输入。",v:"—",s:"官方 readme"},
+ {n:"坏 XML 地图",c:"pit",d:"本机 爱琴海海战（10p）.tmx 首字符非 '<'，不是有效 TMX，统计时被跳过。",v:"—",s:"本机实测"}
+];
+
+const tabsEl=document.getElementById('tabs'), grid=document.getElementById('grid');
+const qEl=document.getElementById('q'), countEl=document.getElementById('count');
+let cat='all';
+function tab(label,key){const b=document.createElement('button');b.className='tab'+(cat===key?' on':'');b.textContent=label;b.onclick=()=>{cat=key;render();};return b;}
+function renderTabs(){
+  tabsEl.innerHTML='';
+  tabsEl.appendChild(tab('全部','all'));
+  for(const k in CATS) tabsEl.appendChild(tab(CATS[k].label,k));
+}
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function render(){
+  renderTabs();
+  const q=qEl.value.trim().toLowerCase();
+  const list=DATA.filter(d=>(cat==='all'||d.c===cat) &&
+    (!q || [d.n,d.d,d.v,d.s||'',d.f||'',CATS[d.c].label].join(' ').toLowerCase().includes(q)));
+  countEl.textContent='共 '+list.length+' 条 / 总计 '+DATA.length+' 条';
+  document.getElementById('empty').style.display=list.length?'none':'block';
+  grid.innerHTML=list.map(d=>{
+    const meta=CATS[d.c];
+    return '<div class="card"><div class="top"><span class="name">'+esc(d.n)+'</span>'+
+      '<span class="badge '+meta.cls+'">'+meta.label+'</span></div>'+
+      '<div class="desc">'+esc(d.d)+'</div>'+
+      '<div class="kv"><span>取值</span><span><code>'+esc(d.v)+'</code></span></div>'+
+      (d.f?'<div class="kv"><span>频次</span><span>'+esc(d.f)+'</span></div>':'')+
+      '<div class="src">来源：'+esc(d.s||'')+'</div></div>';
+  }).join('');
+}
+qEl.addEventListener('input',render);
+document.addEventListener('keydown',e=>{
+  if(e.key==='/'&&document.activeElement!==qEl){e.preventDefault();qEl.focus();}
+  if(e.key==='Escape'&&document.activeElement===qEl){qEl.value='';render();qEl.blur();}
+});
+render();
+</script>
+</body>
+</html>

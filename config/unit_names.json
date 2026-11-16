@@ -1,0 +1,1606 @@
+{
+  "source": "Rusted Warfare · <游戏目录1.15>",
+  "count": 160,
+  "units": [
+    {
+      "raw": "NULL",
+      "cn": "",
+      "en": "",
+      "key": "",
+      "group": "机甲",
+      "folder": "mechs_small",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "aaBeamGunship",
+      "cn": "AA激光射束战机",
+      "en": "AA Beam Gunship",
+      "key": "aaBeamGunship",
+      "group": "空军",
+      "folder": "aa_beam_gunship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "aaBeamGunship_afterburn",
+      "cn": "AA激光射束战机",
+      "en": "AA Beam Gunship",
+      "key": "aaBeamGunship",
+      "group": "空军",
+      "folder": "aa_beam_gunship",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "airFactory",
+      "cn": "空军基地",
+      "en": "Air Factory",
+      "key": "airFactory",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "airShip",
+      "cn": "拦截机",
+      "en": "Interceptor",
+      "key": "airShip",
+      "group": "空军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "amphibiousJet",
+      "cn": "两栖喷气机",
+      "en": "Amphibious Jet",
+      "key": "amphibiousJet",
+      "group": "空军",
+      "folder": "amphibious_jet",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "antiAirTurret",
+      "cn": "防空炮塔",
+      "en": "Anti-air Turret",
+      "key": "antiAirTurret",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "antiAirTurretFlak",
+      "cn": "T2 - 高射炮",
+      "en": "Anti-air Flak",
+      "key": "antiAirTurretFlak",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "antiNukeLaucher",
+      "cn": "反核防御",
+      "en": "Anti-Nuke Defence",
+      "key": "AntiNukeLaucher",
+      "group": "核武器",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "antiNukeLauncherC",
+      "cn": "反核防御",
+      "en": "Anti-Nuke Defence",
+      "key": "AntiNukeLaucher",
+      "group": "核武器",
+      "folder": "nukes",
+      "hidden": false,
+      "replace": "AntiNukeLaucher"
+    },
+    {
+      "raw": "artillery",
+      "cn": "自行火炮",
+      "en": "Artillery",
+      "key": "artillery",
+      "group": "陆军",
+      "folder": "tanks",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "attackSubmarine",
+      "cn": "潜水艇",
+      "en": "Attack Submarine",
+      "key": "attackSubmarine",
+      "group": "海军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "battleShip",
+      "cn": "战列舰",
+      "en": "Battle Ship",
+      "key": "battleShip",
+      "group": "海军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bomber",
+      "cn": "轰炸机",
+      "en": "Bomber",
+      "key": "bomber",
+      "group": "空军",
+      "folder": "bomber",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugBee",
+      "cn": "蜜蜂虫",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugExtractor",
+      "cn": "虫族采集器",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugExtractorT2",
+      "cn": "虫族采集器 T2",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugFly",
+      "cn": "飞行虫",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugGenerator",
+      "cn": "虫族发电站",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugGeneratorN",
+      "cn": "虫族发电站（中型）",
+      "en": "Generator",
+      "key": "",
+      "group": "虫族",
+      "folder": "bug_base",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugGeneratorNT2",
+      "cn": "虫族发电站（中型）T2",
+      "en": "Generator",
+      "key": "",
+      "group": "虫族",
+      "folder": "bug_base",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugGeneratorT2",
+      "cn": "虫族发电站 T2",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugMelee",
+      "cn": "虫族近战虫",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugMeleeLarge",
+      "cn": "大型近战虫",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugMeleeSmall",
+      "cn": "小型近战虫",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugMeleeT31",
+      "cn": "杀手虫 Alpha",
+      "en": "Killer alpha",
+      "key": "",
+      "group": "虫族",
+      "folder": "bug_melee",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugNest",
+      "cn": "虫巢",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugPickup",
+      "cn": "虫族拾取物",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugRanged",
+      "cn": "虫族远程虫",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugRangedT2",
+      "cn": "虫族远程虫 T2",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugSpore",
+      "cn": "孢子虫",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugTurret",
+      "cn": "虫族炮塔",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "bugWasp",
+      "cn": "黄蜂虫",
+      "en": "",
+      "key": "",
+      "group": "虫族",
+      "folder": "classic_bugs",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "builder",
+      "cn": "建造者",
+      "en": "Builder",
+      "key": "builder",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "builderShip",
+      "cn": "海上建造者",
+      "en": "Builder Ship",
+      "key": "builderShip",
+      "group": "海军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "c_amphibiousJet",
+      "cn": "两栖喷气机",
+      "en": "Amphibious Jet",
+      "key": "amphibiousJet",
+      "group": "空军",
+      "folder": "amphibious_jet",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "c_amphibiousJet_transition",
+      "cn": "两栖喷气机",
+      "en": "Amphibious Jet",
+      "key": "amphibiousJet",
+      "group": "空军",
+      "folder": "amphibious_jet",
+      "hidden": true,
+      "replace": "NONE"
+    },
+    {
+      "raw": "c_amphibiousJet_underwater",
+      "cn": "两栖喷气机",
+      "en": "Amphibious Jet",
+      "key": "amphibiousJet",
+      "group": "空军",
+      "folder": "amphibious_jet",
+      "hidden": true,
+      "replace": "NONE"
+    },
+    {
+      "raw": "c_antiAirTurret",
+      "cn": "防空炮塔",
+      "en": "Anti-air Turret",
+      "key": "antiAirTurret",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": "antiAirTurret"
+    },
+    {
+      "raw": "c_antiAirTurretT2",
+      "cn": "T2 - 防空炮塔",
+      "en": "Anti-air T2",
+      "key": "antiAirTurretT2",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": "antiAirTurretT2"
+    },
+    {
+      "raw": "c_antiAirTurretT3",
+      "cn": "T3 - 防空炮塔",
+      "en": "Anti-air T3",
+      "key": "antiAirTurretT3",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "c_artillery",
+      "cn": "自行火炮",
+      "en": "Artillery",
+      "key": "artillery",
+      "group": "陆军",
+      "folder": "tanks",
+      "hidden": true,
+      "replace": "artillery"
+    },
+    {
+      "raw": "c_experimentalTank",
+      "cn": "实验坦克",
+      "en": "Experimental Tank",
+      "key": "experimentalTank",
+      "group": "陆军",
+      "folder": "experimental_tank",
+      "hidden": true,
+      "replace": "experimentalTank"
+    },
+    {
+      "raw": "c_helicopter",
+      "cn": "直升机",
+      "en": "Helicopter",
+      "key": "helicopter",
+      "group": "空军",
+      "folder": "helicopter",
+      "hidden": true,
+      "replace": "helicopter"
+    },
+    {
+      "raw": "c_interceptor",
+      "cn": "拦截机",
+      "en": "Interceptor",
+      "key": "airShip",
+      "group": "空军",
+      "folder": "interceptor",
+      "hidden": true,
+      "replace": "airShip"
+    },
+    {
+      "raw": "c_laserTank",
+      "cn": "激光坦克",
+      "en": "Laser Tank",
+      "key": "laserTank",
+      "group": "陆军",
+      "folder": "laser_tank",
+      "hidden": true,
+      "replace": "laserTank"
+    },
+    {
+      "raw": "c_mammothTank",
+      "cn": "猛犸坦克",
+      "en": "Mammoth Tank",
+      "key": "mammothTank",
+      "group": "陆军",
+      "folder": "mammoth_tank",
+      "hidden": true,
+      "replace": "mammothTank"
+    },
+    {
+      "raw": "c_tank",
+      "cn": "坦克",
+      "en": "Tank",
+      "key": "tank",
+      "group": "陆军",
+      "folder": "tanks",
+      "hidden": true,
+      "replace": "tank"
+    },
+    {
+      "raw": "c_turret_t1",
+      "cn": "炮塔",
+      "en": "Turret",
+      "key": "turret",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": "turret"
+    },
+    {
+      "raw": "c_turret_t1_artillery",
+      "cn": "火炮",
+      "en": "Artillery",
+      "key": "turret_artillery",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": "turret_artillery"
+    },
+    {
+      "raw": "c_turret_t1_lightning",
+      "cn": "闪电炮塔",
+      "en": "Lightning",
+      "key": "turret_lightning",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "c_turret_t2_artillery",
+      "cn": "火炮 T2",
+      "en": "Artillery T2",
+      "key": "turret_artilleryT2",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "c_turret_t2_flame",
+      "cn": "火焰喷射器",
+      "en": "Flamethrower",
+      "key": "turret_flamethrower",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": "turret_flamethrower"
+    },
+    {
+      "raw": "c_turret_t2_gun",
+      "cn": "机枪 T2",
+      "en": "Turret T2",
+      "key": "turretT2",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": "turretT2"
+    },
+    {
+      "raw": "c_turret_t2_lightning",
+      "cn": "闪电炮塔 T2",
+      "en": "Lightning T2",
+      "key": "turret_lightningT2",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "c_turret_t3_gun",
+      "cn": "重机枪塔 T3",
+      "en": "Turret T3",
+      "key": "turretT3",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": true,
+      "replace": "turretT3"
+    },
+    {
+      "raw": "combatEngineer",
+      "cn": "战斗工程师",
+      "en": "Combat Engineer",
+      "key": "combatEngineer",
+      "group": "陆军",
+      "folder": "combat_engineer",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "commandCenter",
+      "cn": "指挥中心",
+      "en": "Command",
+      "key": "commandCenter",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "creditsCrates",
+      "cn": "资金箱子",
+      "en": "Credits crate",
+      "key": "creditsCrates",
+      "group": "经济",
+      "folder": "resource_deposits",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "crystalResource",
+      "cn": "水晶",
+      "en": "Crystal",
+      "key": "crystalResource",
+      "group": "经济",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "crystal_mid",
+      "cn": "中型晶体",
+      "en": "",
+      "key": "",
+      "group": "经济",
+      "folder": "resource_deposits",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "custom_tank",
+      "cn": "测试坦克",
+      "en": "Test Tank",
+      "key": "",
+      "group": "陆军",
+      "folder": "test_tank",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "dropship",
+      "cn": "运输机",
+      "en": "Dropship",
+      "key": "dropship",
+      "group": "空军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "example_faction_picker",
+      "cn": "阵营选择器（开发用）",
+      "en": "Faction Picker",
+      "key": "",
+      "group": "其他",
+      "folder": "miscellaneous",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "experiementalCarrier",
+      "cn": "航空母舰",
+      "en": "Carrier",
+      "key": "experiementalCarrier",
+      "group": "海军",
+      "folder": "experimental_carrier",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "experimentalDropship",
+      "cn": "飞行堡垒",
+      "en": "Flying Fortress",
+      "key": "experimentalDropship",
+      "group": "空军",
+      "folder": "experimental_dropship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "experimentalGunship",
+      "cn": "实验悬浮型气垫船",
+      "en": "Support Hovertank",
+      "key": "experimentalGunship",
+      "group": "空军",
+      "folder": "experimental_gunship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "experimentalGunshipLanded",
+      "cn": "实验悬浮型气垫船",
+      "en": "",
+      "key": "experimentalGunshipLanded",
+      "group": "空军",
+      "folder": "experimental_gunship",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "experimentalHoverTank",
+      "cn": "概念型悬浮坦克",
+      "en": "Shielded Hovertank",
+      "key": "experimentalHoverTank",
+      "group": "陆军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "experimentalLandFactory",
+      "cn": "实验工厂",
+      "en": "Experimental Factory",
+      "key": "experimentalLandFactory",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "experimentalSpider",
+      "cn": "实验型战斗蜘蛛",
+      "en": "Experimental Spider",
+      "key": "experimentalSpider",
+      "group": "机甲",
+      "folder": "experimental_spider",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "experimentalTank",
+      "cn": "实验坦克",
+      "en": "Experimental Tank",
+      "key": "experimentalTank",
+      "group": "陆军",
+      "folder": "experimental_tank",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "extractor",
+      "cn": "资源抽取器",
+      "en": "Extractor",
+      "key": "extractor",
+      "group": "经济",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "extractorT1",
+      "cn": "资源抽取器",
+      "en": "Extractor",
+      "key": "extractor",
+      "group": "经济",
+      "folder": "extractor",
+      "hidden": false,
+      "replace": "extractor"
+    },
+    {
+      "raw": "extractorT2",
+      "cn": "资源抽取器",
+      "en": "Extractor",
+      "key": "extractor",
+      "group": "经济",
+      "folder": "extractor",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "extractorT3",
+      "cn": "资源抽取器",
+      "en": "Extractor",
+      "key": "extractor",
+      "group": "经济",
+      "folder": "extractor",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "extractorT3_overclocked",
+      "cn": "资源抽取器",
+      "en": "Extractor",
+      "key": "extractor",
+      "group": "经济",
+      "folder": "extractor",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "extractorT3_reinforced",
+      "cn": "资源抽取器",
+      "en": "Extractor",
+      "key": "extractor",
+      "group": "经济",
+      "folder": "extractor",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "fabricator",
+      "cn": "资源制造仪",
+      "en": "Fabricator",
+      "key": "fabricator",
+      "group": "经济",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "fabricatorT1",
+      "cn": "资源制造仪",
+      "en": "Fabricator",
+      "key": "fabricator",
+      "group": "经济",
+      "folder": "fabricator",
+      "hidden": false,
+      "replace": "fabricator"
+    },
+    {
+      "raw": "fabricatorT2",
+      "cn": "资源制造仪",
+      "en": "Fabricator",
+      "key": "fabricator",
+      "group": "经济",
+      "folder": "fabricator",
+      "hidden": false,
+      "replace": "NONE"
+    },
+    {
+      "raw": "fabricatorT3",
+      "cn": "资源制造仪",
+      "en": "Fabricator",
+      "key": "fabricator",
+      "group": "经济",
+      "folder": "fabricator",
+      "hidden": false,
+      "replace": "NONE"
+    },
+    {
+      "raw": "fireBee",
+      "cn": "火蜂战机",
+      "en": "Fire Bee",
+      "key": "fireBee",
+      "group": "虫族",
+      "folder": "fire_bee",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "flare_10s",
+      "cn": "信号弹",
+      "en": "Flare",
+      "key": "",
+      "group": "其他",
+      "folder": "miscellaneous",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "gunBoat",
+      "cn": "机枪艇",
+      "en": "Gun Boat",
+      "key": "gunBoat",
+      "group": "海军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "gunShip",
+      "cn": "武装直升机",
+      "en": "Gun Ship",
+      "key": "gunShip",
+      "group": "空军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "heavyAAShip",
+      "cn": "重型防空舰",
+      "en": "Heavy AA Ship",
+      "key": "heavyAAShip",
+      "group": "海军",
+      "folder": "heavy_aa_ship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "heavyArtillery",
+      "cn": "重型火炮",
+      "en": "Heavy Artillery",
+      "key": "heavyArtillery",
+      "group": "陆军",
+      "folder": "tanks",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "heavyBattleship",
+      "cn": "重型战舰",
+      "en": "Heavy Battleship",
+      "key": "heavyBattleship",
+      "group": "海军",
+      "folder": "heavy_battleship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "heavyHoverTank",
+      "cn": "重型气垫坦克",
+      "en": "Heavy Hovertank",
+      "key": "heavyHoverTank",
+      "group": "陆军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "heavyInterceptor",
+      "cn": "重型拦截机",
+      "en": "Heavy Interceptor",
+      "key": "heavyInterceptor",
+      "group": "空军",
+      "folder": "heavy_interceptor",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "heavyMissileShip",
+      "cn": "重型导弹舰",
+      "en": "Heavy Missile Ship",
+      "key": "heavyMissileShip",
+      "group": "海军",
+      "folder": "heavy_missile_ship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "heavySub",
+      "cn": "重型潜艇",
+      "en": "Heavy Sub",
+      "key": "heavySub",
+      "group": "海军",
+      "folder": "heavy_sub",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "heavyTank",
+      "cn": "重型坦克",
+      "en": "Heavy Tank",
+      "key": "heavyTank",
+      "group": "陆军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "helicopter",
+      "cn": "直升机",
+      "en": "Helicopter",
+      "key": "helicopter",
+      "group": "空军",
+      "folder": "helicopter",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "hoverTank",
+      "cn": "悬浮坦克",
+      "en": "Hovertank",
+      "key": "hoverTank",
+      "group": "陆军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "hovercraft",
+      "cn": "登陆艇",
+      "en": "Landing Craft",
+      "key": "hovercraft",
+      "group": "海军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "laboratory",
+      "cn": "实验室",
+      "en": "Laboratory",
+      "key": "",
+      "group": "建筑",
+      "folder": "laboratory",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "ladyBug",
+      "cn": "瓢虫",
+      "en": "Ladybug",
+      "key": "ladybug",
+      "group": "虫族",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "landFactory",
+      "cn": "陆军工厂",
+      "en": "Land Factory",
+      "key": "landFactory",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "laserDefence",
+      "cn": "激光防御塔",
+      "en": "Laser Shield",
+      "key": "laserDefence",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "laserTank",
+      "cn": "激光坦克",
+      "en": "Laser Tank",
+      "key": "laserTank",
+      "group": "陆军",
+      "folder": "laser_tank",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "lightGunship",
+      "cn": "轻型武装直升机",
+      "en": "Light Gun Ship",
+      "key": "lightGunship",
+      "group": "空军",
+      "folder": "light_gunship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "lightSub",
+      "cn": "水下探测器",
+      "en": "Underwater Probe",
+      "key": "lightSub",
+      "group": "海军",
+      "folder": "light_sub",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mammothTank",
+      "cn": "猛犸坦克",
+      "en": "Mammoth Tank",
+      "key": "mammothTank",
+      "group": "陆军",
+      "folder": "mammoth_tank",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechArtillery",
+      "cn": "火炮机甲",
+      "en": "Artillery Mech",
+      "key": "mechArtillery",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechBunker",
+      "cn": "移动炮塔",
+      "en": "Mobile Turret",
+      "key": "mechBunker",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechBunkerDeployed",
+      "cn": "移动炮塔",
+      "en": "Mobile Turret",
+      "key": "mechBunkerDeployed",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "mechEngineer",
+      "cn": "机械师",
+      "en": "Mech Engineer",
+      "key": "mechEngineer",
+      "group": "机甲",
+      "folder": "mech_engineer",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechFactory",
+      "cn": "机械工厂",
+      "en": "Mech Factory",
+      "key": "mechFactory",
+      "group": "机甲",
+      "folder": "mech_factory",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechFactoryT2",
+      "cn": "T2 - 机械工厂",
+      "en": "Mech Factory T2",
+      "key": "mechFactoryT2",
+      "group": "机甲",
+      "folder": "mech_factory",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechFlame",
+      "cn": "喷火机甲",
+      "en": "Flame Mech",
+      "key": "mechFlame",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechFlyingLanded",
+      "cn": "",
+      "en": "",
+      "key": "",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "mechFlyingTakeoff",
+      "cn": "",
+      "en": "",
+      "key": "",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "mechGun",
+      "cn": "基础机甲",
+      "en": "Basic Mech",
+      "key": "mechGun",
+      "group": "机甲",
+      "folder": "mechs_small",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechHeavyMissile",
+      "cn": "重型防空机械装甲",
+      "en": "Heavy Anti-Air Mech",
+      "key": "mechHeavyMissile",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechLaser",
+      "cn": "等离子机甲",
+      "en": "Plasma Mech",
+      "key": "mechLaser",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechLightning",
+      "cn": "特斯拉机甲",
+      "en": "Tesla Mech",
+      "key": "mechLightning",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechMinigun",
+      "cn": "机枪机甲",
+      "en": "Minigun Mech",
+      "key": "mechMinigun",
+      "group": "机甲",
+      "folder": "mechs_large",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "mechMissile",
+      "cn": "防空机甲",
+      "en": "Anti-Air Mech",
+      "key": "mechMissile",
+      "group": "机甲",
+      "folder": "mechs_small",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "missileAirship",
+      "cn": "导弹飞艇",
+      "en": "Missile Airship",
+      "key": "missileAirship",
+      "group": "空军",
+      "folder": "missile_airship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "missileTank",
+      "cn": "防空导弹坦克",
+      "en": "AA Missile Tank",
+      "key": "missileTank",
+      "group": "陆军",
+      "folder": "missile_tank",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "missing",
+      "cn": "",
+      "en": "",
+      "key": "",
+      "group": "其他",
+      "folder": "missing_unit",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider",
+      "cn": "模块化蜘蛛",
+      "en": "Modular Spider",
+      "key": "modularSpider",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_antiair",
+      "cn": "萨姆防空炮T1",
+      "en": "Sam T1",
+      "key": "modularSpider_antiair",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_antiairFlak",
+      "cn": "高射炮T2",
+      "en": "Flak T2",
+      "key": "modularSpider_antiairFlak",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_antiairT2",
+      "cn": "萨姆防空炮T2",
+      "en": "Sam T2",
+      "key": "modularSpider_antiairT2",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_antinuke",
+      "cn": "反核装置",
+      "en": "Anti-Nuke",
+      "key": "modularSpider_antinuke",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_artillery",
+      "cn": "火炮装置T1",
+      "en": "Artillery T1",
+      "key": "modularSpider_artillery",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_blink",
+      "cn": "瞬移模块",
+      "en": "Blink",
+      "key": "modularSpider_blink",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_emptySlot",
+      "cn": "闲置中...",
+      "en": "Empty",
+      "key": "modularSpider_emptySlot",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_fabricator",
+      "cn": "资源制造装置T1",
+      "en": "Fabricator T1",
+      "key": "modularSpider_fabricator",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_fabricatorT2",
+      "cn": "资源制造装置T2",
+      "en": "Fabricator T2",
+      "key": "modularSpider_fabricatorT2",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_gunturret",
+      "cn": "机枪T1",
+      "en": "Gun T1",
+      "key": "modularSpider_gunturret",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_gunturretT2",
+      "cn": "机枪T2",
+      "en": "Gun T2",
+      "key": "modularSpider_gunturretT2",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_laserdefense",
+      "cn": "激光防御装置",
+      "en": "Laser Defense",
+      "key": "modularSpider_laserdefense",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_lightning",
+      "cn": "闪电炮塔T1",
+      "en": "Lightning T1",
+      "key": "modularSpider_lightning",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_nonEmpty",
+      "cn": "",
+      "en": "",
+      "key": "",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_shieldGen",
+      "cn": "护盾核心",
+      "en": "Shield Gen",
+      "key": "modularSpider_shieldGen",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_smallgunturret",
+      "cn": "等离子装置T1",
+      "en": "Plasma T1",
+      "key": "modularSpider_smallgunturret",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_smallgunturretT2",
+      "cn": "等离子装置T2",
+      "en": "Plasma T2",
+      "key": "modularSpider_smallgunturretT2",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_speed",
+      "cn": "速度模块",
+      "en": "Speed",
+      "key": "modularSpider_speed",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "modularSpider_speedIncomplete",
+      "cn": "速度模块",
+      "en": "Speed",
+      "key": "modularSpider_speed",
+      "group": "机甲",
+      "folder": "modular_spider",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "nautilusSubmarine",
+      "cn": "鹦鹉螺号",
+      "en": "Nautilus",
+      "key": "nautilusSubmarine",
+      "group": "海军",
+      "folder": "nautilus",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "nautilusSubmarineLand",
+      "cn": "",
+      "en": "",
+      "key": "",
+      "group": "海军",
+      "folder": "nautilus",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "nautilusSubmarineSurface",
+      "cn": "",
+      "en": "",
+      "key": "",
+      "group": "海军",
+      "folder": "nautilus",
+      "hidden": true,
+      "replace": ""
+    },
+    {
+      "raw": "nukeLaucher",
+      "cn": "核弹发射井",
+      "en": "Nuke Launcher",
+      "key": "NukeLaucher",
+      "group": "核武器",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "nukeLauncherC",
+      "cn": "核弹发射井",
+      "en": "Nuke Launcher",
+      "key": "NukeLaucher",
+      "group": "核武器",
+      "folder": "nukes",
+      "hidden": false,
+      "replace": "NukeLaucher"
+    },
+    {
+      "raw": "outpostT1",
+      "cn": "瞭望塔",
+      "en": "Watch Tower",
+      "key": "outpostT1",
+      "group": "建筑",
+      "folder": "outpost",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "outpostT2",
+      "cn": "瞭望塔 T2",
+      "en": "Watch Tower T2",
+      "key": "outpostT2",
+      "group": "建筑",
+      "folder": "outpost",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "plasmaTank",
+      "cn": "等离子坦克",
+      "en": "Plasma Tank",
+      "key": "plasmaTank",
+      "group": "陆军",
+      "folder": "plasma_tank",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "repairbay",
+      "cn": "修复湾",
+      "en": "Repair Bay",
+      "key": "repairbay",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "robotCrab",
+      "cn": "侦察机器人",
+      "en": "Scout bot",
+      "key": "",
+      "group": "机甲",
+      "folder": "nautilus",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "robotCrabWater",
+      "cn": "两栖侦察机器人",
+      "en": "",
+      "key": "",
+      "group": "机甲",
+      "folder": "nautilus",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "scout",
+      "cn": "侦察者",
+      "en": "Scout",
+      "key": "scout",
+      "group": "陆军",
+      "folder": "scout",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "scoutShip",
+      "cn": "侦察舰",
+      "en": "",
+      "key": "",
+      "group": "海军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "seaFactory",
+      "cn": "海军基地",
+      "en": "Sea Factory",
+      "key": "seaFactory",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "spyDrone",
+      "cn": "间谍无人机",
+      "en": "Spy Drone",
+      "key": "spyDrone",
+      "group": "空军",
+      "folder": "spy_drone",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "tank",
+      "cn": "坦克",
+      "en": "Tank",
+      "key": "tank",
+      "group": "陆军",
+      "folder": "tanks",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "turret",
+      "cn": "炮塔",
+      "en": "Turret",
+      "key": "turret",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    }
+  ]
+}

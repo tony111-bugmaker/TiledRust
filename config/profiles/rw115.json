@@ -1,0 +1,19 @@
+{
+  "version_id": "1.15",
+  "display_name": "铁锈战争 1.15",
+  "game_root": "<游戏目录1.15>",
+  "tilesets_root": "<游戏目录1.15>/assets/tilesets",
+  "mods_maps": "<游戏目录1.15>/mods/maps",
+  "export_dir": "<游戏目录1.15>/mods/maps",
+  "tiled_exe": "<Tiled目录>/tiled.exe",
+  "rasterizer_exe": "<Tiled目录>/tmxrasterizer.exe",
+  "units_sources": [
+    "<tilesets_root>/units.tsx",
+    "<mods_maps>/units.tsx",
+    "<game_root>/assets/units/**/*.ini"
+  ],
+  "compression_default": "gzip",
+  "write_enabled": true,
+  "extra_readonly_layers": ["PathingOverride", "UnitObjects"],
+  "sample_map": "<游戏目录1.15>/mods/maps/[p2]example_skirmish_(2p).tmx"
+}

@@ -1,0 +1,19 @@
+{
+  "version_id": "1.14",
+  "display_name": "铁锈战争 1.14（只读优先）",
+  "game_root": "<游戏目录1.14>",
+  "tilesets_root": "<游戏目录1.14>/assets/tilesets",
+  "mods_maps": "<游戏目录1.14>/mods/maps",
+  "export_dir": "<游戏目录1.14>/mods/maps",
+  "tiled_exe": "<Tiled目录>/tiled.exe",
+  "rasterizer_exe": "<Tiled目录>/tmxrasterizer.exe",
+  "units_sources": [
+    "<tilesets_root>/units.tsx",
+    "<mods_maps>/units.tsx",
+    "<game_root>/assets/units/**/*.ini"
+  ],
+  "compression_default": "gzip",
+  "write_enabled": false,
+  "extra_readonly_layers": ["PathingOverride", "UnitObjects"],
+  "sample_map": "<游戏目录1.14>/assets/maps/skirmish/[p2]Big Island (2p).tmx"
+}

@@ -1,0 +1,15 @@
+{
+  "order": ["Ground", "Items", "Units", "Triggers", "set"],
+  "rules": {
+    "Ground": {"kind": "tile", "writable": true, "note": "地形图层，必须填满；使用 automapping 时会被覆盖"},
+    "Items": {"kind": "tile", "writable": true, "note": "资源池/树/石头；禁止放地形，否则寻路失效"},
+    "Units": {"kind": "tile", "writable": true, "note": "起始单位与建筑"},
+    "Triggers": {"kind": "object", "writable": false, "note": "地图设置、玩家统计、事件（首版只读保真）"},
+    "set": {"kind": "tile", "writable": true, "note": "游戏完全忽略，仅供 Tiled automapping"},
+    "UnitObjects": {"kind": "object", "writable": false, "note": "1.14/1.15 均有，对象写 team+unit（首版只读保真）"},
+    "PathingOverride": {"kind": "tile", "writable": false, "note": "社区资料，官方图零命中；按未知层只读保真"}
+  },
+  "unknown_policy": "readonly_preserve",
+  "hidden_by_default": ["set"],
+  "case_insensitive": true
+}

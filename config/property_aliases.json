@@ -1,0 +1,16 @@
+{
+  "aliases": {
+    "large-clift": "large-cliff"
+  },
+  "known": [
+    "water", "water-bridge", "cliff", "cliff-soft", "lava", "lava-cliff",
+    "large-cliff", "block-land", "small-rock", "large-rock", "tree",
+    "res_pool", "team", "unit", "type",
+    "showFog", "credits", "delay", "target", "allyGroup", "fog", "winCondition",
+    "index", "introText", "dir", "activatedBy", "globalMessage", "showOnMap",
+    "maxUnits", "text", "spawnUnits", "unload", "id", "deactivatedBy", "style",
+    "textColor", "textOffsetY", "warmup", "loseCondition", "ai", "onlyBuildings",
+    "minUnits", "globalMessage_delayPerChar"
+  ],
+  "unverified": ["team=-2", "PathingOverride", "set 在 NotTiled 与 Tiled 下的语义冲突"]
+}

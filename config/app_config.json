@@ -1,0 +1,10 @@
+{
+  "game_roots": {
+    "1.14": "<游戏目录1.14>",
+    "1.15": "<游戏目录1.15>"
+  },
+  "tiled_root": "<Tiled目录>",
+  "profile": "1.15",
+  "recent_files": [],
+  "auto_locate": true
+}
