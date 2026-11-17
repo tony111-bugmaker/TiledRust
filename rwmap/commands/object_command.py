@@ -68,6 +68,7 @@ def _signature_of(objects):
     return [
         (o.object_id, o.name, o.shape, o.x, o.y, o.width, o.height,
          getattr(o, "rotation", 0.0), tuple(o.points),
+         getattr(o, "image_flip_h", False), getattr(o, "image_flip_v", False),
          dict(o.properties.values), dict(o.properties.types),
          set(o.properties.text_props))
         for o in objects

@@ -4,23 +4,24 @@
 
 **保真写回**是核心设计：只改被编辑图层的 `<data>`，不改层顺序与未知属性，官方 1.14 / 1.15 地图可直接打开再保存。
 
-> 完整开发记录（35+ 轮迭代、已知坑、验收细节）见 [README-开发日志.md](README-开发日志.md)。
+> 完整开发记录（40+ 轮迭代、已知坑、验收细节）见 [README-开发日志.md](README-开发日志.md)。
 
 ## 功能
 
 - 打开 / 编辑官方 `1.14`、`1.15` `.tmx` 地图，正确渲染 5 层
-- 图层面板：Tiled 风格（行内眼睛/锁、图标按钮栏、双击重命名、右键菜单）
+- 图层面板：Tiled 风格（行内眼睛/锁、图标按钮栏、双击重命名、右键菜单）；新建按钮点击弹「瓦片层 / 对象层」菜单并加在最底层、锁定按钮批量锁定/解锁其它所有层
 - 图块集面板：底部标签栏 + 整图集视图 + 矩形框选盖章
-- 绘制时自动地图（官方 `rules.txt`，Ground / Items 实时过渡）；支持自定义规则导入
+- 绘制时自动地图（官方 `rules.txt`，Ground / Items 实时过渡）；支持自定义规则导入，入口收敛到「地图」菜单（见 [自动映射规则指南.md](docs/自动映射规则指南.md)）
 - 画笔 / 橡皮 / 临时吸管（I 键或 Alt+左键）、框选复制粘贴移动、Ctrl+Z/Y 撤销
 - 钢笔 / 贝塞尔曲线，接入自动地图
 - 对象编辑：矩形/椭圆/点/多边形/折线/图块/模板/文字/图片，8 手柄缩放
 - 触发器语义编辑 + 节点图视图
 - 随机生成单位（按分类筛选、权重）、单位检测
 - 缩略图、导出到 `mods/maps`、`.rwmod` 打包
-- 翻转/旋转整图、自动裁剪、新建地图、地图属性编辑、转到图块
+- 完整「地图」菜单：添加图集文件 / 外部图集 / 规则图集、自动映射、自动裁剪、转到图块、切换图集、地图属性编辑
+- 翻转/旋转整图（4 个变换按钮在对象工具栏最右）、自动裁剪、调整地图尺寸（拖动预览 + 溢出连通块红框）、新建地图（宽 / 高 / 图集三项）
 - 面板布局自定义（显隐、导入/导出 JSON）
-- 深色双色主题（黑 `#101010` + 深灰 `#242424`，详见 [docs/双色暗色主题.md](docs/双色暗色主题.md)）
+- 深色双色主题（近黑 `#1e1e1e` + 深灰 `#2a2e34`，详见 [docs/双色暗色主题.md](docs/双色暗色主题.md)）
 
 ## 运行
 
@@ -90,11 +91,21 @@ examples/     验证截图与演示脚本
 
 ## 测试
 
+改动代码后，优先只跑受影响的测试（按改动文件自动选择相关模块，避免每次跑全量）：
+
 ```bash
-QT_QPA_PLATFORM=offscreen python -m unittest rwmap.tests.test_theme_two_color rwmap.tests.test_roundtrip
+.venv\Scripts\python.exe -m rwmap.tests.run_impacted rwmap/widgets/transform_icons.py
+.venv\Scripts\python.exe -m rwmap.tests.run_impacted --list <改动文件...>   # 预览命中
+.venv\Scripts\python.exe -m rwmap.tests.run_impacted --all                  # 全量
 ```
 
-全量约 686 例（部分测试读取官方地图资产，需先配置游戏路径）。
+也可以直接跑 unittest：
+
+```bash
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s rwmap/tests -t .
+```
+
+全量 706 例 / 63 个模块（部分测试读取官方地图资产，需先配置游戏路径）。
 
 ## 许可
 

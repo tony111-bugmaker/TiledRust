@@ -13,8 +13,10 @@
 * 右侧面板、中文类型 / 属性词典、点阵深色背景与配色均从网页版 1:1 迁移，
   但 TMX 里写回的键和值始终保持英文。
 * 节点可以在画布里拖动摆位、滚轮缩放（矢量绘制，放大不会糊），
-  拖动只影响本视图的布局，不写回文档。拖动会同步数据层坐标，画布
-  sceneRect 按全部节点 + 数屏留白扩展，拖到视口边缘自动滚动跟随。
+  拖动过程中不写回文档；仅在**保存时**把布局以私有属性 rwmap_node_pos
+  写进各对象（以左上角对象为 (0,0) 的相对坐标），下次打开据此恢复。
+  画布 sceneRect 是「全部节点内容框 + 四周各一个视口」的动态范围：平移到
+  任一极限时该方向最近节点刚好完全移出视口，节点移动后范围随之重算。
 * 连线由两层共同渲染：两端节点都在视口内时用逐边 EdgeItem（曲线 + 箭头 +
   标签），其余由常驻的全局连线层按**数据坐标**补画；缩小到概览模式时全局层
   画全部边。因此线与节点是否被渲染无关，缩放 / 虚拟化都不会让线消失。
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import (
@@ -43,7 +46,9 @@ from ..commands.object_command import capture, push_object_edit
 from ..document.layer import ObjectLayer
 from ..document.map_document import allocate_trigger_id, used_trigger_ids
 from ..document.map_object import object_uid
-from ..document.properties import EDITOR_GROUP_PROPERTY
+from ..document.properties import (
+    EDITOR_GROUP_PROPERTY, EDITOR_NODE_POS_PROPERTY,
+)
 from ..theme import ASH, INK, TEXT, TEXT_DIM, qc
 from .dock_chrome import install_title_bar
 from .trigger_inspector import (
@@ -644,7 +649,10 @@ class EdgeItem(QGraphicsItem):
     def paint(self, painter: QPainter, _option, _widget=None):
         col = QColor(self.color)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(col, 1.8))
+        # cosmetic 笔宽：按屏幕像素固定，缩放时连线粗细不变（与全局连线层一致）
+        pen = QPen(col, 1.8)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(self._path)
 
@@ -673,7 +681,9 @@ class GraphOverviewItem(QGraphicsItem):
     def __init__(self, dock: "TriggerGraphDock"):
         super().__init__()
         self.dock = dock
-        self.setZValue(5)
+        # 概览节点色块必须盖在连线之上：全局连线层 z=6，故这里设 7。
+        # 概览模式没有 live NodeItem（z=20），不存在与真实节点的层级冲突。
+        self.setZValue(7)
         self.setAcceptedMouseButtons(Qt.NoButton)
         # 让 paint 拿到 exposedRect，局部重绘时只画视口附近的色块，
         # 而不是每次都遍历几千个节点（缩小/平移时的流畅度关键）。
@@ -758,41 +768,72 @@ class GraphEdgeLayerItem(QGraphicsItem):
         self._rect = QRectF(0, 0, 1, 1)
         self._boxes: dict[int, QRectF] = {}
 
+    def _edge_box(self, e, nodes) -> QRectF | None:
+        """一条边的裁剪盒：两端节点框 + 整条贝塞尔曲线的凸包，再放宽余量。
+
+        裁剪盒必须包住整条曲线（凸包 = 两个端点 + 两个控制点），否则概览模式
+        按 exposedRect 裁剪时会把弯曲的那一段切掉。抽成单独方法供全量/增量共用。
+        """
+        a = nodes.get(e.src)
+        b = nodes.get(e.dst)
+        if a is None or b is None:
+            return None
+        pa, pb = _edge_endpoints(a, b)
+        lane, total = self.dock._edge_lanes.get(id(e), (0, 1))
+        bow = (lane - (total - 1) / 2.0) * 46.0
+        dx = max(56.0, abs(pb.x() - pa.x()) * 0.45)
+        pts = (pa, pb,
+               QPointF(pa.x() + dx, pa.y() + bow),
+               QPointF(pb.x() - dx, pb.y() + bow))
+        curve = QRectF(
+            QPointF(min(p.x() for p in pts), min(p.y() for p in pts)),
+            QPointF(max(p.x() for p in pts), max(p.y() for p in pts)))
+        return QRectF(
+            QPointF(min(a.x, b.x), min(a.y, b.y)),
+            QPointF(max(a.x, b.x) + NODE_W,
+                    max(a.y, b.y) + NODE_H)).united(curve).adjusted(
+                        -70, -70, 70, 70)
+
     def set_content(self):
         """refresh 后重算每条边的裁剪盒与整层包围盒。"""
         nodes = self.dock.data.nodes
         r = QRectF()
         boxes: dict[int, QRectF] = {}
         for e in self.dock.data.edges:
-            a = nodes.get(e.src)
-            b = nodes.get(e.dst)
-            if a is None or b is None:
-                continue
-            # 裁剪盒必须包住整条贝塞尔曲线（凸包 = 两个端点 + 两个控制点），
-            # 否则概览模式按 exposedRect 裁剪时会把弯曲的那一段切掉。
-            pa, pb = _edge_endpoints(a, b)
-            lane, total = self.dock._edge_lanes.get(id(e), (0, 1))
-            bow = (lane - (total - 1) / 2.0) * 46.0
-            dx = max(56.0, abs(pb.x() - pa.x()) * 0.45)
-            pts = (pa, pb,
-                   QPointF(pa.x() + dx, pa.y() + bow),
-                   QPointF(pb.x() - dx, pb.y() + bow))
-            curve = QRectF(
-                QPointF(min(p.x() for p in pts), min(p.y() for p in pts)),
-                QPointF(max(p.x() for p in pts), max(p.y() for p in pts)))
-            box = QRectF(
-                QPointF(min(a.x, b.x), min(a.y, b.y)),
-                QPointF(max(a.x, b.x) + NODE_W,
-                        max(a.y, b.y) + NODE_H)).united(curve).adjusted(
-                            -70, -70, 70, 70)
-            boxes[id(e)] = box
-            r |= box
+            box = self._edge_box(e, nodes)
+            if box is not None:
+                boxes[id(e)] = box
+                r |= box
         for n in nodes.values():
             r |= QRectF(n.x, n.y, NODE_W, NODE_H)
         self._boxes = boxes
         self.prepareGeometryChange()
         self._rect = (r.adjusted(-120, -120, 120, 120)
                       if not r.isEmpty() else QRectF(0, 0, 1, 1))
+        self.update()
+
+    def refresh_node_boxes(self, node_key: str):
+        """节点被拖动后，只重算与该节点相连的边的裁剪盒（O(度数)）。
+
+        旧实现只在 refresh 时算一次盒；节点拖动后坐标变了、盒却停在旧位置，
+        paint 里 `visible.intersects(box)` 用旧盒判断，把已经移到视口内的线误裁
+        掉 —— 表现就是「拖动节点后有的连线不见了」。这里增量更新受影响的边。
+        """
+        nodes = self.dock.data.nodes
+        changed = False
+        new_rect = self._rect
+        for e in self.dock.data.edges:
+            if e.src != node_key and e.dst != node_key:
+                continue
+            box = self._edge_box(e, nodes)
+            if box is None:
+                continue
+            self._boxes[id(e)] = box
+            new_rect |= box
+            changed = True
+        if changed:
+            self.prepareGeometryChange()
+            self._rect = new_rect
         self.update()
 
     def expand_to(self, x: float, y: float):
@@ -899,6 +940,37 @@ class GraphView(QGraphicsView):
         self._band_start = QPointF()
         self._link_src = None        # 端口拖拽连线：{'item':NodeItem,'port':'out'/'in'}
         self._link_tmp = None        # 拖拽中的临时连线（QGraphicsLineItem）
+        # 边缘判定区：拖动节点进入视口四周的细边条时，定时器持续滚动视口，
+        # 即使鼠标停在判定区里不动也会一直滚（旧实现只在 mouseMove 事件里滚一步）。
+        self._edge_dir = (0, 0)      # 当前命中方向 (dx, dy)，(0,0)=未命中
+        self._last_auto_scroll_ms = 0
+        self._auto_scroll_paused = False
+        self._auto_scroll_timer = QTimer(self)
+        self._auto_scroll_timer.setInterval(self.AUTO_SCROLL_INTERVAL_MS)
+        self._auto_scroll_timer.timeout.connect(self._auto_scroll_tick)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        # 仅拖动节点时显示四周判定区（细窄半透明边条，命中那条会高亮），
+        # 平时完全不画，不干扰正常视图。
+        dock = self.scene().dock if self.scene() is not None else None
+        if dock is None or dock._dragging_key is None:
+            return
+        vp = self.viewport()
+        w, h, t = vp.width(), vp.height(), self.EDGE_ZONE_PX
+        if w <= 0 or h <= 0:
+            return
+        dx, dy = self._edge_dir
+        base = QColor(120, 180, 255, 22)     # 未命中：很淡的蓝
+        hot = QColor(95, 210, 138, 58)       # 命中：偏绿的醒目高亮
+        p = QPainter(vp)
+        p.setPen(Qt.NoPen)
+        # 上 / 下 / 左 / 右四条，命中方向用 hot 高亮
+        p.fillRect(QRectF(0, 0, w, t), hot if dy < 0 else base)
+        p.fillRect(QRectF(0, h - t, w, t), hot if dy > 0 else base)
+        p.fillRect(QRectF(0, 0, t, h), hot if dx < 0 else base)
+        p.fillRect(QRectF(w - t, 0, t, h), hot if dx > 0 else base)
+        p.end()
 
     def zoom(self) -> float:
         return float(self.transform().m11())
@@ -998,6 +1070,7 @@ class GraphView(QGraphicsView):
         if (event.button() == Qt.LeftButton and dock is not None
                 and dock._dragging_key is not None):
             dock._dragging_key = None
+            self._stop_auto_scroll()
             dock._schedule_sync()
         if (self._link_src is not None and self._link_tmp is not None
                 and event.button() == Qt.LeftButton):
@@ -1062,26 +1135,109 @@ class GraphView(QGraphicsView):
             return
         super().mouseDoubleClickEvent(event)
 
-    def _auto_scroll_on_drag(self, pos):
-        """拖动节点到视口边缘时按固定「屏幕像素」步长滚动，让视图跟着走。
+    # 边缘判定区：视口四周各一条窄带（屏幕像素，不随缩放变化）。拖动节点
+    # 进入判定区即启动定时器持续滚动，鼠标停住也一直走；离开 / 松手即停。
+    EDGE_ZONE_PX = 22                 # 判定区宽度（"不要太大"）
+    AUTO_SCROLL_INTERVAL_MS = 32      # 定时器间隔 / 节流间隔
+    AUTO_SCROLL_PX = 5                # 每步滚动的屏幕像素
 
-        QGraphicsView 默认拖动 movable item 不会自动滚动，鼠标一到视口边缘节点
-        就拖不动了。这里按缩放换算场景步长，保证任何缩放下屏幕位移都约 16px。
-        """
+    def _auto_scroll_enabled(self) -> bool:
+        return not getattr(self, "_auto_scroll_paused", False)
+
+    def _edge_direction(self, pos):
+        """鼠标落在视口边缘判定区时返回 (dx, dy)，否则 (0, 0)。"""
         vp = self.viewport()
-        margin, px = 42, 16
         x, y = pos.x(), pos.y()
-        dx = -1 if x < margin else (1 if x > vp.width() - margin else 0)
-        dy = -1 if y < margin else (1 if y > vp.height() - margin else 0)
-        if not dx and not dy:
+        dx = -1 if x < self.EDGE_ZONE_PX else (
+            1 if x > vp.width() - self.EDGE_ZONE_PX else 0)
+        dy = -1 if y < self.EDGE_ZONE_PX else (
+            1 if y > vp.height() - self.EDGE_ZONE_PX else 0)
+        return dx, dy
+
+    def _auto_scroll_tick(self):
+        """定时器回调：只要还在判定区且正在拖动，就持续滚动一小步。
+
+        滚动视口的同时把被拖节点沿同方向移动对应场景距离，让它保持在鼠标所在
+        的屏幕边缘 —— 否则鼠标停住时视口滚走、节点却停在原场景位置，看起来
+        「拖到边缘就不动」。用滚动条**实际变化量**驱动节点位移，滚到极限时节点
+        也不会脱离视口。
+        """
+        if not self._auto_scroll_enabled() or self._edge_dir == (0, 0):
+            self._stop_auto_scroll()
             return
-        step = max(1, int(round(px / max(self.zoom(), 0.08))))
+        dock = self.scene().dock if self.scene() is not None else None
+        if dock is None or dock._dragging_key is None:
+            self._stop_auto_scroll()
+            return
+        dx, dy = self._edge_dir
+        step = max(1, int(round(self.AUTO_SCROLL_PX / max(self.zoom(), 0.08))))
+        moved_x = moved_y = 0
         if dx:
-            self.horizontalScrollBar().setValue(
-                self.horizontalScrollBar().value() + dx * step)
+            bar = self.horizontalScrollBar()
+            old = bar.value()
+            bar.setValue(old + dx * step)
+            moved_x = bar.value() - old
         if dy:
-            self.verticalScrollBar().setValue(
-                self.verticalScrollBar().value() + dy * step)
+            bar = self.verticalScrollBar()
+            old = bar.value()
+            bar.setValue(old + dy * step)
+            moved_y = bar.value() - old
+        if moved_x or moved_y:
+            self._move_dragged_node_by(moved_x, moved_y, dock)
+
+    def _move_dragged_node_by(self, screen_dx: int, screen_dy: int, dock):
+        """被拖节点跟随视口滚动：屏幕位移换算成场景坐标并前移节点。
+
+        setPos 会触发 itemChange → on_node_moved → remember_position，从而同步
+        数据层坐标、连线裁剪盒、动态平移范围；这些回调已有重入锁保护。
+        """
+        item = dock.node_items.get(dock._dragging_key)
+        if item is None:
+            return
+        z = max(self.zoom(), 0.08)
+        pos = item.pos()
+        item.setPos(pos.x() + screen_dx / z, pos.y() + screen_dy / z)
+
+    def _stop_auto_scroll(self):
+        """停止持续滚动并清掉判定区高亮。"""
+        self._edge_dir = (0, 0)
+        self._last_auto_scroll_ms = 0
+        if self._auto_scroll_timer.isActive():
+            self._auto_scroll_timer.stop()
+        self.viewport().update()
+
+    def _auto_scroll_on_drag(self, pos):
+        """拖动节点到边缘判定区：更新方向、启动持续滚动，并立即走一步。
+
+        保留「鼠标事件驱动的一步滚动 + 时间节流」（兼容原有行为与测试），
+        在此基础上新增 QTimer 持续驱动：鼠标停在判定区里不动时也会一直滚。
+        """
+        if not self._auto_scroll_enabled():
+            self._stop_auto_scroll()
+            return
+        direction = self._edge_direction(pos)
+        self._edge_dir = direction
+        if direction == (0, 0):
+            # 离开边缘区：停定时器 + 清节流戳，下次贴边能马上响应
+            self._stop_auto_scroll()
+            return
+        if not self._auto_scroll_timer.isActive():
+            self._auto_scroll_timer.start()
+        now = int(time.monotonic() * 1000)
+        last = getattr(self, "_last_auto_scroll_ms", 0)
+        if last and now - last < self.AUTO_SCROLL_INTERVAL_MS:
+            return
+        self._last_auto_scroll_ms = now
+        # 即时走一步：不检查 dragging_key（兼容脱离真实拖动的直接调用 / 测试）。
+        # 定时器后续步骤才检查 dragging_key，保证松手后不再持续滚。
+        dx, dy = direction
+        step = max(1, int(round(self.AUTO_SCROLL_PX / max(self.zoom(), 0.08))))
+        if dx:
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() + dx * step)
+        if dy:
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() + dy * step)
 
     def _hit_port(self, sp: QPointF):
         """命中某个节点的端口（黄点）则返回 (item, 'out'/'in')，否则 None。
@@ -1157,6 +1313,8 @@ class TriggerGraphDock(QDockWidget):
         self._overview_item: "GraphOverviewItem" | None = None
         # 正在拖动的节点：虚拟化不得回收它，否则拖出视口就「拖不动 / 节点消失」
         self._dragging_key: str | None = None
+        # setSceneRect 引发滚动→itemChange 连锁回调时的重入锁，防拖动出视口爆栈
+        self._scene_rect_syncing: bool = False
         # 全局连线层的过滤缓存与同起终点「车道」表（None = 尚未计算）
         self._active_cache: set[str] | None = None
         self._edge_lanes: dict[int, tuple[int, int]] = {}
@@ -1380,38 +1538,132 @@ class TriggerGraphDock(QDockWidget):
         if node is not None:
             node.x, node.y = pos.x(), pos.y()
         self.edge_layer.expand_to(pos.x(), pos.y())
+        # 增量重算该节点相连边的裁剪盒：否则盒停在旧位置，全局连线层会把移到
+        # 视口内的线裁掉（拖完节点后有的连线消失）。
+        self.edge_layer.refresh_node_boxes(key)
         self.edge_layer.update()
-        # 拖动高频调用：只传当前节点右下角，落在已有画布范围内就 O(1) 返回
-        self._ensure_scene_rect(QPointF(pos.x() + NODE_W, pos.y() + NODE_H))
+        # 节点位置已同步到 data，重算动态平移范围（可增可减）
+        self._ensure_scene_rect()
 
-    def _ensure_scene_rect(self, point=None):
-        """给画布一个宽松、只增不减的 sceneRect。
+    # ---------- 节点图位置属性（仅保存时写，不入撤销栈） ----------
+    @staticmethod
+    def _parse_node_pos(raw) -> tuple[float, float] | None:
+        if not raw:
+            return None
+        try:
+            xs, ys = str(raw).split(",", 1)
+            return float(xs), float(ys)
+        except (ValueError, TypeError):
+            return None
 
-        QGraphicsScene 未显式设置 sceneRect 时，会按「当前 scene 里 item 的包围盒」
-        自动收缩；虚拟化后 scene 里只有视口内的一两百个节点，sceneRect 就等于这一
-        小块，滚动条范围随之只剩几十像素 —— 节点拖出视口、平移到远处都做不到，
-        表现就是「移动范围有限制」。这里按**全部数据节点** + 数屏留白显式设置，
-        只扩展不收缩；fit_view 里不设置，因此不会把边界锁死在内容框上。
+    def write_positions_to_properties(self) -> int:
+        """保存前调用：把当前节点图布局写进每个对象的私有属性。
+
+        以「左上角」节点（x+y 最小，平局取更靠左上者）为原点 (0,0)，其余节点
+        写相对偏移 ``dx,dy``。这样整张图平移不会让坐标整体漂移，原点对象恒为
+        (0,0)。只在保存时调用——拖动过程不写、不入撤销栈。写后置所在对象层
+        dirty，writer 才会把属性落盘。
+
+        返回写入的对象数；节点图从未打开（data 为空）时返回 0，不误写。
         """
-        if self.scene is None or self.view is None:
-            return
-        # 拖动时的快速路径：点还在画布范围内就无需 O(N) 重算包围盒
-        if point is not None and self.scene.sceneRect().contains(point):
-            return
+        if self.data is None or not self.data.nodes:
+            return 0
+        nodes = list(self.data.nodes.values())
+        origin = min(nodes, key=lambda n: (n.x + n.y, n.x, n.y))
+        ox, oy = origin.x, origin.y
+        touched: set[str] = set()
+        count = 0
+        for n in nodes:
+            obj = n.obj
+            if obj is None or obj.properties is None:
+                continue
+            dx = int(round(n.x - ox))
+            dy = int(round(n.y - oy))
+            obj.properties.set(EDITOR_NODE_POS_PROPERTY, f"{dx},{dy}", "string")
+            touched.add(n.layer_name)
+            count += 1
+        for name in touched:
+            for layer in (self.doc.layers if self.doc else []):
+                if isinstance(layer, ObjectLayer) and layer.name == name:
+                    layer.dirty = True
+        return count
+
+    def _saved_positions(self) -> dict[str, QPointF]:
+        """从对象属性读回保存时的相对布局；属性值即绝对坐标（原点恒在 0,0）。
+
+        只在「缓存为空」（首次打开文档）时由 refresh 采用，会话内手动摆位优先。
+        """
+        out: dict[str, QPointF] = {}
+        for key, n in self.data.nodes.items():
+            if n.obj is None or n.obj.properties is None:
+                continue
+            p = self._parse_node_pos(
+                n.obj.properties.get(EDITOR_NODE_POS_PROPERTY))
+            if p is not None:
+                out[key] = QPointF(p[0], p[1])
+        return out
+
+    # ---------- 动态平移范围 ----------
+    # 设计：sceneRect = 全部节点内容框 + 四周各「一个视口尺寸」（场景坐标）。
+    # QGraphicsView 视口左上角的可移动区间是 [sceneRect.left, sceneRect.right-W]，
+    # 其中 W = 视口宽/zoom。左右各扩 W 后，该区间变成
+    # [contentLeft-W, contentRight]：视口推到最左，右边缘正好落在最左节点左边缘
+    # （该节点刚好完全移出）；推到最右，左边缘落在最右节点右边缘。上下同理。
+    # 于是平移极限 = 最近节点刚好完全不显示；视口在节点群中间时区间很大、自由
+    # 平移；节点被拖走 → 内容框变 → 范围重算，视口被 Qt clamp 到新合法位置。
+    @staticmethod
+    def _rect_fuzzy_equal(a: QRectF, b: QRectF, eps: float = 1.0) -> bool:
+        return (abs(a.left() - b.left()) <= eps and abs(a.top() - b.top()) <= eps
+                and abs(a.right() - b.right()) <= eps
+                and abs(a.bottom() - b.bottom()) <= eps)
+
+    def _content_rect(self) -> QRectF:
+        """当前显示层全部数据节点的内容框（用 data 层坐标，虚拟化回收不影响）。
+
+        只统计 ``data.nodes``（已按当前对象层过滤）里的节点：节点的 x/y 在拖动
+        时由 remember_position 同步，所以 data 坐标就是最新布局，无需再叠加
+        _manual_pos。旧实现无条件遍历整个 _manual_pos，而它的 key 带层名前缀、
+        跨层累积，切到别的层后仍被上一层手摆到远处的坐标撑大 —— 表现就是
+        「切换对象层时视口边界不变，一直在算别的对象」。改用当前层节点集合后，
+        边界随层切换正确收缩 / 扩展。
+        """
         r = QRectF()
         for n in self.data.nodes.values():
             r |= QRectF(n.x, n.y, NODE_W, NODE_H)
-        for p in self._manual_pos.values():
-            r |= QRectF(p.x(), p.y(), NODE_W, NODE_H)
         if r.isEmpty():
             r = QRectF(0, 0, NODE_W, NODE_H)
+        return r
+
+    def _desired_scene_rect(self) -> QRectF:
+        """目标 sceneRect = 内容框 + 四周各一个视口尺寸（场景坐标）。"""
+        r = self._content_rect()
         vp = self.view.viewport()
         z = max(self.view.zoom(), 0.05)
-        margin = max(3000.0, 2.5 * max(vp.width(), vp.height()) / z)
-        r = r.adjusted(-margin, -margin, margin, margin)
-        cur = self.scene.sceneRect()
-        if not cur.contains(r):
-            self.scene.setSceneRect(cur.united(r))
+        mx = (vp.width() / z) if vp is not None and vp.width() > 0 else 0.0
+        my = (vp.height() / z) if vp is not None and vp.height() > 0 else 0.0
+        return r.adjusted(-mx, -my, mx, my)
+
+    def _ensure_scene_rect(self, point=None):
+        """把 sceneRect 同步到动态范围（可增可减）。
+
+        ``point`` 仅为兼容旧调用保留，已不再使用：范围始终按全部节点重算，
+        节点往回拖时才能收缩。容差比较避免 rect 未变时反复 setSceneRect。
+
+        重入保护：setSceneRect 会改变滚动条 → scrollContentsBy → 移动 item →
+        itemChange → on_node_moved → remember_position → 又调到这里。若不加锁，
+        拖动节点出视口时会形成无限递归（实测爆栈）。用 ``_scene_rect_syncing``
+        把这次 setSceneRect 引发的连锁回调挡在门外。
+        """
+        if self.scene is None or self.view is None or self._scene_rect_syncing:
+            return
+        target = self._desired_scene_rect()
+        if self._rect_fuzzy_equal(self.scene.sceneRect(), target):
+            return
+        self._scene_rect_syncing = True
+        try:
+            self.scene.setSceneRect(target)
+        finally:
+            self._scene_rect_syncing = False
 
     def select_object(self, obj):
         """地图画布选中对象时，同步高亮对应节点（不发 objectSelected，避免回环）。"""
@@ -1628,7 +1880,7 @@ class TriggerGraphDock(QDockWidget):
             return
         active = self._active_keys()
         self._active_cache = set(active)
-        # 画布范围按全部数据节点扩展，避免 sceneRect 收缩到 live 节点那一小块
+        # 同步动态平移范围（内容框 + 四周各一视口），缩放/节点移动后重算
         self._ensure_scene_rect()
         try:
             vp = self.view.viewport()
@@ -1733,6 +1985,11 @@ class TriggerGraphDock(QDockWidget):
         # 位置稳定：先按 key 恢复全部已知坐标（手动摆位 + 上一次自动布局结果），
         # 只给「新出现」的节点找空位。以前只要没人手摆过就每次 refresh 重跑
         # 拓扑分层，连一条线 / 改个属性都会让整张图的节点跳到新位置。
+        # 首次打开文档（缓存为空）：用对象里保存的相对布局作种子，避免每次打开
+        # 都重跑自动布局、把用户上次摆好的位置打乱。会话内手动摆位优先级更高。
+        if not self._pos_cache and not self._manual_pos:
+            for key, pos in self._saved_positions().items():
+                self._pos_cache[key] = pos
         for key, node in self.data.nodes.items():
             pos = self._manual_pos.get(key)
             if pos is None:
@@ -1853,10 +2110,10 @@ class TriggerGraphDock(QDockWidget):
         for n in active:
             rect |= QRectF(n.x, n.y, NODE_W, NODE_H)
         rect = rect.adjusted(-50, -50, 50, 50)
-        # 关键：不要 setSceneRect(rect) 把画布锁死在内容边界内。
-        # 显式设置的 sceneRect 是「固定」的，不会随节点拖动自动扩展；一旦把节点拖到
-        # 边界之外，视图无法继续跟随滚动，节点看起来就像「卡住 / 移动范围受限」。
-        # 不设置时场景会随节点位置自动扩展，把节点拖到任意位置都能被视图跟随。
+        # fit_view 只负责把视口对准内容，不在这里 setSceneRect：平移范围由
+        # _ensure_scene_rect 按「内容框 + 四周各一视口」动态维护（这里 emit 的
+        # zoomChanged 会经 _schedule_sync → _sync_visible 触发重算），节点移动
+        # 时范围随之扩展/收缩，视口被 clamp 到新合法位置。
         self.view.setTransformationAnchor(QGraphicsView.AnchorViewCenter)
         self.view.fitInView(rect, Qt.KeepAspectRatio)
         # 节点特别多时不要缩到看不清；用户可以滚轮缩小看全貌

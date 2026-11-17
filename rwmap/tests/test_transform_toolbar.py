@@ -4,8 +4,8 @@
 1. 水平/垂直翻转、顺/逆时针旋转 4 个按钮挂在对象工具栏最右端，带图标。
 2. 4 个按钮前面有一条竖线分隔符（工具栏 separator）。
 3. 这 4 项不再出现在「地图」菜单里（按用户要求迁移，不是复制）。
-4. 点击按钮确实调用 _transform_map(op)，且 op 与按钮一一对应。
-5. 变换功能本身仍然工作（_transform_map 走的是同一批 action）。
+4. 点击按钮确实调用 _transform_content(op)，且 op 与按钮一一对应。
+5. 按钮排在「瓦片画笔」文字之前；无目标时禁用，变换目标见 test_content_transform。
 """
 from __future__ import annotations
 
@@ -60,10 +60,20 @@ class TransformToolbarTest(unittest.TestCase):
         self.assertGreater(idx, 0)
         self.assertTrue(acts[idx - 1].isSeparator())
 
-    def test_transform_buttons_are_last_in_toolbar(self):
+    def test_transform_buttons_before_tile_brush_label(self):
+        """4 个变换按钮排在「瓦片画笔」文字之前（图标在左、文字在右）。"""
         bar = self.w.object_toolbar
-        acts = [a for a in bar.actions() if not a.isSeparator()]
-        self.assertEqual(acts[-4:], bar._transform_actions)
+        acts = bar.actions()
+        first = acts.index(bar._transform_actions[0])
+        last = acts.index(bar._transform_actions[-1])
+        hint_idx = acts.index(bar._hint_action)
+        self.assertLess(last, hint_idx, "变换按钮应在「瓦片画笔」文字之前")
+        self.assertLess(first, hint_idx)
+        # 按钮与文字之间只有一条分隔符，hint 是最后一项
+        self.assertTrue(acts[last + 1].isSeparator())
+        self.assertEqual(last + 2, hint_idx)
+        non_sep = [a for a in acts if not a.isSeparator()]
+        self.assertEqual(non_sep[-1], bar._hint_action)
 
     # ---- 3. 菜单里已移除 ----
     def test_not_in_map_menu(self):
@@ -81,7 +91,7 @@ class TransformToolbarTest(unittest.TestCase):
         ops = ("flip_h", "flip_v", "rot_cw", "rot_ccw")
         w = self.w
         for action, op in zip(w.object_toolbar._transform_actions, ops):
-            with mock.patch.object(w, "_transform_map") as m:
+            with mock.patch.object(w, "_transform_content") as m:
                 action.trigger()
                 m.assert_called_once_with(op)
 

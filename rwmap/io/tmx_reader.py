@@ -157,6 +157,9 @@ def read_document(path, profile=None, resolver: ResourceResolver | None = None) 
                             obj.image_source = source
                 if obj.shape == "image" and not obj.image_source:
                     obj.image_source = obj.properties.get("image", "")
+                if obj.shape == "image":
+                    obj.image_flip_h = str(obj.properties.get("imageFlipH", "")) in ("1", "true", "True")
+                    obj.image_flip_v = str(obj.properties.get("imageFlipV", "")) in ("1", "true", "True")
                 # 游戏格式回读：mapText 触发器 -> 编辑器里的文字对象。
                 # 必须在形状推断之后，因为这类对象没有 <text> 子节点。
                 if (obj.type_ == game_decor.TEXT_TRIGGER_TYPE

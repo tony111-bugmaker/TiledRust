@@ -1,7 +1,7 @@
 """QGraphicsScene：文档切换、局部刷新、层可见性/透明度。"""
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsRectItem
 
@@ -47,6 +47,7 @@ class ObjectSelectionBoxItem(QGraphicsRectItem):
         self.setBrush(QColor(150, 210, 255, 28))
         self.setZValue(2001)
         self._scale = 1.0
+        self._show_handles = True
         self.setFlag(QGraphicsItem.ItemUsesExtendedStyleOption, True)
 
     def set_view_scale(self, scale: float):
@@ -56,6 +57,15 @@ class ObjectSelectionBoxItem(QGraphicsRectItem):
             self._scale = scale
             self.update()
 
+    def set_show_handles(self, enabled: bool):
+        """点对象没有尺寸、不能缩放，选中时不画 8 个黄色箭头（框仍保留）。"""
+        value = bool(enabled)
+        if value == self._show_handles:
+            return
+        self.prepareGeometryChange()
+        self._show_handles = value
+        self.update()
+
     def boundingRect(self) -> QRectF:
         r = self.rect()
         pad = effective_handle_size(r, self._scale) * 2.2 + 6
@@ -64,7 +74,7 @@ class ObjectSelectionBoxItem(QGraphicsRectItem):
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
         r = self.rect()
-        if r.isEmpty():
+        if r.isEmpty() or not self._show_handles:
             return
         draw_selection(painter, r,
                        abs(painter.worldTransform().m11()) or 1.0)
@@ -553,6 +563,9 @@ class TileStampPreviewItem(QGraphicsItem):
 
 
 class MapScene(QGraphicsScene):
+    # 选中对象集合变化（set_selected_objects 里 emit），供主窗口刷新变换按钮启用态。
+    objectSelectionChanged = Signal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.doc = None
@@ -667,6 +680,7 @@ class MapScene(QGraphicsScene):
                 item.set_selected(self._selected)
         # 选中态变化后同步更新「整体包围框」（含 8 个可拖拽的黄色缩放箭头）。
         self.set_object_selection_box(self._selection_combined_bounds())
+        self.objectSelectionChanged.emit(list(new))
 
     def refresh_objects(self):
         for item in self.layer_items.values():
@@ -836,6 +850,11 @@ class MapScene(QGraphicsScene):
         views = self.views()
         if views:
             self._obj_sel_box.set_view_scale(views[0].transform().m11())
+        # 点对象没有宽高，缩放无意义：纯点选区不画 8 个黄色箭头。
+        # 只要混有任意非点对象，就照常显示（整组缩放时点只挪中心）。
+        show_handles = any(getattr(o, "shape", None) != "point"
+                           for o in self._selected)
+        self._obj_sel_box.set_show_handles(show_handles)
         self._obj_sel_box.setRect(rect)
         self._obj_sel_box.setVisible(True)
 

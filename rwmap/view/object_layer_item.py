@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF,
+    QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF, QTransform,
 )
 from PySide6.QtWidgets import QGraphicsItem
 
@@ -193,7 +193,26 @@ def object_pixmap(doc, obj) -> QPixmap | None:
         if key not in _IMAGE_CACHE:
             _IMAGE_CACHE[key] = QPixmap(key)
         pix = _IMAGE_CACHE[key]
-        return pix if not pix.isNull() else None
+        if pix.isNull():
+            return None
+        # 图片对象的翻转 / 旋转：镜像用 scale(-1,1)，90° 旋转用 QTransform.rotate，
+        # 缓存原始 pixmap，变形只在返回值上做，避免污染缓存 / 反复读盘。
+        flip_h = getattr(obj, "image_flip_h", False)
+        flip_v = getattr(obj, "image_flip_v", False)
+        rotation = getattr(obj, "rotation", 0.0) or 0.0
+        if flip_h or flip_v or rotation:
+            cx, cy = pix.width() / 2.0, pix.height() / 2.0
+            tx = QTransform()
+            tx.translate(cx, cy)
+            if rotation:
+                tx.rotate(rotation)
+            if flip_h:
+                tx.scale(-1, 1)
+            if flip_v:
+                tx.scale(1, -1)
+            tx.translate(-cx, -cy)
+            pix = pix.transformed(tx, Qt.SmoothTransformation)
+        return pix
     return None
 
 

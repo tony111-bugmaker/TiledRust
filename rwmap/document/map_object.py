@@ -76,6 +76,9 @@ class MapObject:
     text: str = ""
     text_style: dict = field(default_factory=dict)
     image_source: str = ""
+    # 插入图片的翻转状态：只作用于图片对象，随 TMX 自定义属性持久化。
+    image_flip_h: bool = False
+    image_flip_v: bool = False
     template: str = ""
 
     @property

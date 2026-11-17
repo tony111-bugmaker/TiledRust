@@ -38,6 +38,36 @@ def rotate_cells_90(cells: list[int], width: int, height: int, cw: bool):
     return out, new_w, new_h
 
 
+def transform_stamp(stamp, op: str):
+    """翻转 / 旋转「右键框选的图章内容」（raw gid 的 2D 矩阵）。
+
+    图章是 ``list[list[int]]``，来自右键拖动抓取的矩形区域（见
+    ``MainWindow._capture_region``）。与 :func:`flip_cells` / :func:`rotate_cells_90`
+    语义一致：只搬动每格的 raw gid（含翻转标志位），不改单格内部的翻转语义。
+    返回新的 2D 列表，不改动入参；旋转 90° 会交换行列数。
+    """
+    if not stamp or not stamp[0]:
+        return [list(row) for row in stamp]
+    rows, cols = len(stamp), len(stamp[0])
+    if op == "flip_h":
+        return [list(reversed(row)) for row in stamp]
+    if op == "flip_v":
+        return [list(row) for row in reversed(stamp)]
+    if op in ("rot_cw", "rot_ccw"):
+        cw = op == "rot_cw"
+        out = []
+        for r in range(cols):                 # 新矩阵 cols 行 rows 列
+            row = []
+            for c in range(rows):
+                if cw:
+                    row.append(stamp[rows - 1 - c][r])
+                else:
+                    row.append(stamp[c][cols - 1 - r])
+            out.append(row)
+        return out
+    raise ValueError(f"未知变换: {op}")
+
+
 def _rot_point(px: float, py: float, cx: float, cy: float, cw: bool):
     dx, dy = px - cx, py - cy
     if cw:

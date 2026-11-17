@@ -11,6 +11,11 @@ from dataclasses import dataclass, field
 # 因此写入 TMX 后绝不影响游戏运行。请勿改名或在导出时清洗。
 EDITOR_GROUP_PROPERTY = "rwmap_group"
 
+# 本编辑器私有的「节点图位置」属性键：保存时把每个触发器对象在节点图里的
+# 相对坐标（以左上角对象为原点）写进对象，供下次打开恢复布局。铁锈战争不读
+# 该名字，绝不影响游戏运行。只在保存时写，拖动过程中不实时写。
+EDITOR_NODE_POS_PROPERTY = "rwmap_node_pos"
+
 
 @dataclass
 class PropertyBag:

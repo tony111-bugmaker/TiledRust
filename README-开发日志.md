@@ -838,12 +838,14 @@ locked|unlocked|show_hide_others`（按钮栏）。
 ```bat
 .venv\Scripts\python.exe -m rwmap.probe.probe_report
 .venv\Scripts\python.exe -m unittest discover -s rwmap\tests -v
+REM 改代码后优先只跑受影响模块，不必每次跑全量：
+.venv\Scripts\python.exe -m rwmap.tests.run_impacted <改动文件...>
 ```
 
 探针基线：1.14 + 1.15 共 168 张官方图 100% 可解析；640 个 `<data>` 全为 base64+gzip；
 `mods/maps/embedded_custom_tileset_example.tmx` 为 zlib；84 个 GID 带翻转标志；
 两种 cliff 拼写（`large-cliff` / `large-clift`）都真实存在。报告写到 `logs/probe_report.json`。
-单测 260 项，含 `test_dock_chrome.py`（5 个面板统一格式 / 图标逐像素一致 /
+单测 **706 项 / 63 个模块**，含 `test_dock_chrome.py`（5 个面板统一格式 / 图标逐像素一致 /
 整窗渲染无白底 / 幂等安装 / 浮动·关闭·双击）、
 `test_layers_dock_tiled.py`（Tiled 图标深色化 / 无白底像素 /
 行布局 / 图标按钮 / 标题栏浮动·关闭图标与原生逐像素一致 / 行内眼睛·锁点击 /
@@ -1037,6 +1039,124 @@ firstgid 避让、内存还原、移动/删除/缩放重投影、多图 gid 不�
 同步更新 `test_object_shapes.py` 里针对 `<text>` 子节点的旧断言；
 **全量单测 547 例 0 失败**。
 验收脚本 `rwmap/probe/probe_game_decor.py` 可直接跑一遍完整写盘→读回→二次写盘。
+
+## 第三十六轮：补齐 Tiled「地图」菜单 + 自动映射规则文档
+
+对照 Tiled 的「地图」菜单，把缺失的入口补齐到 `MainWindow`：
+
+- 添加图集文件 / 添加外部图集 / 添加规则图集（`AddExternalTilesetCommand`，同步文档与 DOM）。
+- 自动映射（`Ctrl+M` 全图）、自动裁剪、转到图块、切换图集、地图属性编辑。
+- 对象工具栏上那个「绘制时自动地图」按钮**隐藏**，只保留在「地图」菜单里显示（功能不变），
+  工具栏让位给变换按钮（下一轮）。
+- 新增 [docs/自动映射规则指南.md](docs/自动映射规则指南.md)：用 `文件 → 命令 → 编辑命令`
+  添加规则、Tiled 地形集与 AutoMapping 的区别、层名约定
+  （`regions` / `input_*` / `output_*` / `DeleteTiles` / `AutomappingRadius`），
+  以及官方 `rules.txt` 274 条规则的解析与实测结果。
+
+验收图 `examples/验证_地图菜单补齐.png`。
+
+## 第三十七轮：变换 4 按钮入对象工具栏 + 图标统一风格重绘
+
+- 把水平翻转 / 垂直翻转 / 顺时针旋转 / 逆时针旋转 4 个按钮移到**顶部对象工具栏最右**，
+  前面加一条竖线与对象工具分隔；从「地图」菜单移除，避免两处重复。
+- 图标几经迭代最终定稿为 **QPainter 统一风格自绘**（不再抠 Tiled 原图，见
+  `rwmap/widgets/transform_icons.py`）：亮蓝描边 `#50aaf5` + 淡蓝半透明填充
+  `QColor(90,175,245,70)`，与对象工具栏其余图标一致；旋转箭头单独保留绿色语义色。
+  - 水平翻转 = 左右两个镜像直角三角（尖朝上，中缝 4px）；
+    垂直翻转 = 上下两个镜像三角（尖朝右）。
+  - 旋转 = 两个**全等直角三角形**：左边竖放（直角在右下）、右边是它转 90° 的横放版
+    （直角在左下），中间 4px 缝；逆时针是顺时针整组水平镜像（含绿箭头）。
+    早期只画了一个三角，用户二次反馈后修正。
+  - 绘制坑：`QPainterPath.arcTo()` 前必须 `moveTo()` 到弧起点，否则会多画一条从 (0,0)
+    出来的斜线；Qt 角度 90° 在上方。
+- `test_transform_toolbar.py` 加像素级断言：蓝描边 / 半透明填充 / 绿箭头、无深灰描边、
+  无 base64 `_DATA`、旋转图标左右两半各有 ≥15 个蓝描边像素（防止退化成单三角）。
+
+验收图 `examples/验证_变换按钮入工具栏.png`、`examples/验证_变换图标统一风格.png`。
+
+## 第三十八轮：暗色主题收敛为双色 + UI 色卡 + 调色板工具
+
+- 暗色模式的**界面区分色**严格收敛为两个：`rwmap/theme.py` 中
+  `INK = #1e1e1e`（近黑，最底层）+ `ASH = #2a2e34`（偏黑灰，抬起一层：输入框 / 按钮 /
+  选中 / 边框 / 悬停）。文字单独用 `#d8d8d8` / `#8a8a8a` 保证可读（两色自身对比度仅 1.2:1，
+  正文塞进双色会读不出来）；功能彩色（触发器连线、对象框、选择虚线、图标本身）属语义色，
+  不参与收敛。全应用通过 `apply_app_theme()` + `APP_QSS` 统一切换，`qc()` 支持按 alpha 派生。
+- 生成 UI 色卡 `docs/软件UI色卡.md`，盘点实际用色并给出统一建议。
+- 新增独立小工具 `调色板工具/`（`palette_tool.py` + `palette.json`）：集中维护「旧色 → 新色」
+  映射并对项目文件批量替换。本次换色即用该工具把旧的 `#101010`/`#242424`
+  全部替换为 `#1e1e1e`/`#2a2e34`（工具目录不在同步范围内，仅本地维护）。
+
+验收图 `examples/验证_双色主题.png`、`examples/验证_双色主题换色.png`。
+
+## 第三十九轮：调整地图尺寸对话框重做（拖动预览 + 溢出红框）
+
+从简陋的输入框改为 Tiled 风格的可视化对话框（`rwmap/widgets/resize_map_dialog.py` +
+纯算法 `rwmap/rw/resize.py`）：
+
+- 大小：宽 / 高直接输入；挪动：X / Y 偏移；中央预览图**可用鼠标拖动**内容相对新地图边界定位。
+- 超出新地图边界的瓦片按 **4-邻接连通块画细红框**提示（不是逐格画框）；拖动时红框实时跟随。
+- Bug 修复：预览 `_update_geometry_and_repaint()` 每次 offset 变化都重算 scale / origin
+  （`_content_bounds()` 含 dx/dy），导致 X 从 0→-300 时缩放从 3.25 掉到 0.85，内容像橡皮筋、
+  拖不到负偏移。改为 `mousePressEvent` 时冻结 `_drag_scale` + `_drag_origin`，拖动期间只重算溢出与
+  update（几何 1:1 跟随鼠标），`mouseReleaseEvent` 松手后再重新 fit。
+- 另修 `overflow_info()` 重复累加 dx/dy 导致红框错位。
+
+验收图 `examples/验证_调整地图尺寸对话框.png`、`examples/验证_调整尺寸溢出红框.png`。
+
+## 第四十轮：新建地图对话框重做 + 删除「单位」面板
+
+- **新建地图**：从 4 个连续 `QInputDialog`（含瓦片宽高）改为单一对话框 `NewMapDialog`
+  （`rwmap/widgets/new_map_dialog.py`），只收 3 个值：**宽度 / 高度 / 要哪些图集**
+  （图集多选框，默认勾选 terrain/* + units.tsx）。瓦片尺寸自动取图集 `tilewidth/tileheight`，
+  兜底 20×20；`build_new_document()` 用 `AddExternalTilesetCommand.redo()` 直接同步文档与 DOM。
+- **删除「单位」停靠面板**：删 `rwmap/widgets/units_dock.py` 及其装配 / 信号，
+  `PANEL_SPECS` 面板清单同步缩减；保留 `rw/units.py` 与 `unit_picker.py`（触发器属性面板的单位
+  选择器还在用）。注意图层面板里的 `Units` 是地图图层，不是被删的面板，保留。
+
+验收图 `examples/验证_新建地图对话框.png`、`examples/验证_删除单位面板布局.png`。
+
+## 第四十一轮：图层按钮栏改版（新建弹菜单 / 新层置底 / 批量锁定）
+
+`rwmap/widgets/layers_dock.py` 三处按 Tiled 行为调整：
+
+- **新建按钮**：`MenuButtonPopup → DelayedPopup → InstantPopup`，最终为点击整块按钮立即弹
+  「瓦片层 / 对象层」菜单，选中哪项才建哪项。`QToolButton` 带菜单时普通单击不会发 `triggered`，
+  需接 `clicked`（早期判定区只有一半的 bug 也是 `MenuButtonPopup` 拆分判定区所致）。
+  `_add_layer()` 把新层插到 `doc.layers[0]`（面板显示最下侧 / 最底层），不再插到选中层之上。
+- **删除「向下合并图层」**：移除工具栏按钮、右键入口与 `mergeLayerRequested` 信号；
+  底层 `MergeLayerCommand` / `_merge_layer_down()` 保留（单测仍覆盖）。
+- **「锁定当前层」→「锁定 / 解锁其它所有层」**：`btn_lock` 发新信号 `layersLockChanged(list)`，
+  主窗口 `_on_lock_batch()` 用 `beginMacro/endMacro` + `LayerFlagCommand` 合成一条撤销；
+  图标 / tooltip 固定为「锁定 / 解锁其它所有层」，不再随当前层翻转。行内锁图标仍管单层。
+
+验收图 `examples/验证_图层按钮栏改版.png`。
+
+## 第四十二轮：回归入口优化 + GitHub 开源版同步 / 发布
+
+- **回归优化**：新增 `rwmap/tests/run_impacted.py`（纯标准库，不依赖 git / pytest）：
+  传入改动文件路径，按「导出符号 + 一层反向 import + 人工路由 ROUTES」只跑相关测试模块，
+  `--list` 预览、`--all` 全量；出现在 >35% 测试里的通用名（如 MainWindow）自动剔除。
+  以后改代码不再无差别跑全量 700+ 例。本次图标改动从 44 个模块收敛到 10 个模块 / 127 例。
+- **GitHub 开源**：目标仓库 `tony111-bugmaker/TiledRust`。新增 `tools/sync_opensource.py`
+  把主工作副本一键同步到 `GitHub开源版/`，自动**脱敏**本机路径
+  （`<游戏目录1.15>` / `<Tiled目录>` / `<用户目录>` / `<项目目录>` 占位符），
+  保留发布专属 `README.md` / `README-开发日志.md` / `.gitignore` / `LICENSE`。
+  换行符坑：Windows 下 `read_text/write_text` 会把 LF 转 CRLF 导致 git 显示整文件改动，
+  改用 `read_bytes().decode()` / `write_bytes()` 原样保留。
+- `GitHub开源版/` 已 `git init -b main` 并强制推送（273 文件），远程旧内容整体替换；
+  补 `git branch --set-upstream-to=origin/main main` 建追踪关系（命令行 force push 不会自动建）。
+  `push_to_github.bat` 双击即可再次推送（需写便携版 git 的绝对路径）。
+  操作手册见项目根目录 `同步到GitHub开源版.md`（不在同步范围内）。
+
+## 第四十三轮：清理无用产物（不影响开发）
+
+- 根目录散图、examples 验收图、logs 调试产物共 303 个移到系统回收站（可恢复）；
+  新增 `tools/trash_helper.py`（ctypes 调 `SHFileOperationW` + `FOF_ALLOWUNDO`，零依赖）
+  与 `tools/cleanup_artifacts.py`（清单驱动、分批 100）。两脚本在 `tools/` 下，不同步到开源版。
+- 删除前核查：保留 README / docs 引用的 3 张 examples 图，
+  保留 `logs/` 目录本身（2 个探针 `open("logs/...")` 却不会自动建目录）；
+  音乐修复器全套（ffmpeg.exe / fix_rwmod_*.py / rwmod_fix_core.py / .spec / dist 里的 exe /
+  修复后的 .rwmod）一律不动。清理后相关回归 13 模块通过。
 
 ## 撤销覆盖（Ctrl+Z / Ctrl+Shift+Z）
 

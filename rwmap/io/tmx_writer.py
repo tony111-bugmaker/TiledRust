@@ -189,6 +189,20 @@ def _properties_for_write(bag: PropertyBag, obj=None) -> PropertyBag:
             copy.values[key] = value
             copy.types.pop(key, None)
             copy.text_props.discard(key)   # 统一写 value 属性，游戏最稳
+    if obj is not None and obj.shape == "image":
+        # 图片对象的翻转状态：TMX 无原生字段，用自定义属性持久化（rotation 走原生）。
+        if getattr(obj, "image_flip_h", False):
+            copy.values["imageFlipH"] = "1"
+        else:
+            copy.values.pop("imageFlipH", None)
+        if getattr(obj, "image_flip_v", False):
+            copy.values["imageFlipV"] = "1"
+        else:
+            copy.values.pop("imageFlipV", None)
+        copy.types.pop("imageFlipH", None)
+        copy.types.pop("imageFlipV", None)
+        copy.text_props.discard("imageFlipH")
+        copy.text_props.discard("imageFlipV")
     return copy
 
 

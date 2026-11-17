@@ -338,21 +338,23 @@ class ObjectToolBar(QToolBar):
         self.addSeparator()
         self.hint = QLabel("瓦片画笔")
         self.hint.setStyleSheet(f"color:{TEXT_DIM}; padding-left:4px;")
-        self.addWidget(self.hint)
+        self._hint_action = self.addWidget(self.hint)
         self.orientationChanged.connect(self._on_orientation_changed)
 
-        # 地图变换 4 按钮（水平/垂直翻转、顺/逆时针旋转）由 MainWindow 在
-        # _build_toolbar() 里追加到最右端；action 本身连着 _transform_map。
+        # 变换 4 按钮（水平/垂直翻转、顺/逆时针旋转）由 MainWindow 在
+        # _build_toolbar() 里通过 add_transform_actions 追加；排在本文件的
+        # 「瓦片画笔」文字标签之前（图标在左、文字在右）。
         self._transform_actions: list[QAction] = []
 
     def add_transform_actions(self, items):
-        """在工具栏最右端追加地图变换按钮，前面先加一条竖线分隔符。
+        """把 4 个变换按钮排在「瓦片画笔」文字标签之前（图标左、文字右）。
 
         ``items`` 是 ``[(QAction, icon_kind), ...]``；action 在 MainWindow 里
-        已经连好 ``_transform_map``，这里只负责配图标并做成图标按钮，横排时
-        排在 hint 右侧（最右端），竖排时随工具栏流到下一行。
+        已经连好分发入口，这里只负责配图标并做成图标按钮。`__init__` 里先放了
+        「竖线 + 瓦片画笔」，这里把文字临时摘下，复用它前面那条竖线当作按钮的
+        分隔，追加按钮后再补一条竖线、把文字放回最右端。
         """
-        self.addSeparator()
+        self.removeAction(self._hint_action)  # 文字暂时摘下，竖线留着复用
         for action, kind in items:
             action.setIcon(make_object_icon(kind))
             self.addAction(action)
@@ -363,6 +365,8 @@ class ObjectToolBar(QToolBar):
                 btn.setIconSize(QSize(28, 28))
                 btn.setFixedSize(self.BUTTON_SIZE, self.BUTTON_SIZE)
             self._transform_actions.append(action)
+        self.addSeparator()                   # 按钮与「瓦片画笔」之间的竖线
+        self._hint_action = self.addWidget(self.hint)   # 文字移到最右（新 action）
 
     # ---------------- 布局：竖排时按宽度自动换行 ----------------
     def _grid_columns(self) -> int:

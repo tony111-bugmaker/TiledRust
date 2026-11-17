@@ -93,7 +93,20 @@ class Round9UiTest(unittest.TestCase):
         self.assertEqual((obj.x, obj.y, obj.width, obj.height),
                          (103.0, 97.0, 54.0, 46.0))
 
-    def test_shift_snaps_creation_to_grid(self):
+    def test_ctrl_snaps_creation_to_grid(self):
+        """Ctrl + 创建：吸附到瓦片网格角点（原 Shift 语义已迁到 Ctrl）。"""
+        w = self.w
+        w._set_object_tool("rect")
+        with patch(SHIFT, return_value=Qt.ControlModifier):
+            w.view.objectToolPressed.emit(103.0, 97.0)
+            w.view.objectToolMoved.emit(157.0, 143.0)
+            w.view.objectToolReleased.emit(157.0, 143.0)
+        obj = self._layer().objects[-1]
+        self.assertEqual((obj.x, obj.y, obj.width, obj.height),
+                         (100.0, 100.0, 60.0, 40.0))
+
+    def test_shift_creates_square(self):
+        """Shift + 创建：约束为正方形（取较大边长）。"""
         w = self.w
         w._set_object_tool("rect")
         with patch(SHIFT, return_value=Qt.ShiftModifier):
@@ -101,8 +114,8 @@ class Round9UiTest(unittest.TestCase):
             w.view.objectToolMoved.emit(157.0, 143.0)
             w.view.objectToolReleased.emit(157.0, 143.0)
         obj = self._layer().objects[-1]
-        self.assertEqual((obj.x, obj.y, obj.width, obj.height),
-                         (100.0, 100.0, 60.0, 40.0))
+        self.assertEqual(obj.width, obj.height)
+        self.assertEqual(obj.width, 54)          # 自由坐标，取 max(54, 46)
 
     def test_snap_xy_switch_is_explicit(self):
         self.assertEqual(self.w._snap_xy(103.0, 97.0, False), (103.0, 97.0))
@@ -123,11 +136,11 @@ class Round9UiTest(unittest.TestCase):
 
         other = self._add(x=33.0, y=47.0)
         w.scene.set_selected_objects([other])
-        with patch(SHIFT, return_value=Qt.ShiftModifier):
+        with patch(SHIFT, return_value=Qt.ControlModifier):
             w.view.objectPressed.emit(53.0, 67.0)
             w.view.objectMoved.emit(78.0, 92.0)
             w.view.objectReleased.emit(78.0, 92.0)
-        # Shift：位移按整格吸附（25→20），即「鼠标走一格、对象走一格」
+        # Ctrl：位移按整格吸附（25→20），即「鼠标走一格、对象走一格」
         self.assertEqual((self._current(other.object_id).x,
                           self._current(other.object_id).y), (53.0, 67.0))
 

@@ -460,20 +460,141 @@ class GraphDockTest(unittest.TestCase):
         self.assertEqual(len(dock._overview_item._nodes), 800)
         self.assertEqual(len(dock.node_items), 0)
 
-    # ---------------- 拖动范围 / 全局连线层 ----------------
-    def test_scene_rect_allows_dragging_far(self):
-        """sceneRect 不能再收缩到「当前 live 节点」那一小块，否则滚动条只剩
-        几十像素，节点拖出视口 / 平移到远处都做不到（移动范围有限制）。"""
+    # ---------------- 动态平移范围 / 全局连线层 ----------------
+    def _assert_scene_rect_is_dynamic(self, dock, msg=""):
+        """断言 sceneRect == 内容框四周各扩一个视口尺寸（场景坐标）。"""
+        from PySide6.QtCore import QRectF
+        content = dock._content_rect()
+        vp = dock.view.viewport()
+        z = max(dock.view.zoom(), 0.05)
+        mx = vp.width() / z if vp.width() > 0 else 0.0
+        my = vp.height() / z if vp.height() > 0 else 0.0
+        want = content.adjusted(-mx, -my, mx, my)
+        got = dock.scene.sceneRect()
+        delta = 2.0  # 像素级容差
+        self.assertAlmostEqual(got.left(), want.left(), delta=delta, msg=msg)
+        self.assertAlmostEqual(got.top(), want.top(), delta=delta, msg=msg)
+        self.assertAlmostEqual(got.right(), want.right(), delta=delta, msg=msg)
+        self.assertAlmostEqual(got.bottom(), want.bottom(), delta=delta, msg=msg)
+        return got, want, mx, my
+
+    def test_scene_rect_is_content_plus_one_viewport(self):
+        """平移范围 = 内容框 + 四周各一个视口，不再是固定 3000 大留白。
+
+        数学：视口左上角可移动到 [sceneRect.left, sceneRect.right-W]。左右各扩
+        W 后区间为 [contentLeft-W, contentRight]；推到最右时视口左边缘正好落在
+        最右节点右边缘 —— 即「最近节点刚好完全移出视口即停」。
+        """
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        dock._ensure_scene_rect()
+        got, want, mx, my = self._assert_scene_rect_is_dynamic(dock)
+        # 留白不再是固定 3000：应接近一个视口尺寸
+        self.assertLess(mx, 3000)
+        self.assertGreater(mx, 0)
+        # sceneRect 左右各扩 mx，正好等于内容框左右 ± mx
+        content = dock._content_rect()
+        self.assertAlmostEqual(got.right() - mx, content.right(), delta=2)
+        self.assertAlmostEqual(got.left() + mx, content.left(), delta=2)
+
+    def test_scene_rect_shrinks_when_node_moved_back(self):
+        """节点往回拖 → 内容框收缩 → sceneRect 跟着收缩（不再只增不减）。"""
         from PySide6.QtCore import QPointF
         dock = self._setup()
-        r = dock.scene.sceneRect()
-        self.assertGreater(r.width(), 3000)
-        self.assertGreater(r.height(), 3000)
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        dock._ensure_scene_rect()
+        before = dock.scene.sceneRect()
+        key = next(iter(dock.data.nodes))
+        # 把最左边的节点拖到内容框内部（靠右），内容框左边界应右移
+        dock.remember_position(key, QPointF(5000, 5000))
+        dock._ensure_scene_rect()
+        after = dock.scene.sceneRect()
+        # 拖远后范围扩展包含新位置
+        self.assertTrue(after.contains(QPointF(5000, 5000)))
+        # 再拖回中心附近，范围应收缩（右边界明显小于拖远后的右边界）
+        dock.remember_position(key, QPointF(300, 60))
+        dock._ensure_scene_rect()
+        back = dock.scene.sceneRect()
+        self.assertLess(back.right(), after.right() - 1000,
+                        "节点拖回后画布范围应收缩，不是只增不减")
+        self._assert_scene_rect_is_dynamic(dock, msg="收缩后仍满足动态公式")
+
+    def test_scene_rect_expands_to_hold_dragged_node(self):
+        """节点拖到远处 → 范围扩展包含它，视图才能滚过去（不回归「拖不动」）。"""
+        from PySide6.QtCore import QPointF
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
         key = next(iter(dock.data.nodes))
         dock.remember_position(key, QPointF(9000, -4000))
+        dock._ensure_scene_rect()
         self.assertTrue(
             dock.scene.sceneRect().contains(QPointF(9000, -4000)),
             "拖到远处后画布范围应自动扩展，视图才能滚过去")
+        self._assert_scene_rect_is_dynamic(dock)
+
+    def test_pan_limit_edge_means_nearest_node_just_offscreen(self):
+        """平移极限的几何含义：视口推到最右，最近节点刚好完全在视口外。"""
+        from PySide6.QtCore import QPointF
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        dock._ensure_scene_rect()
+        vp = dock.view.viewport()
+        z = max(dock.view.zoom(), 0.05)
+        mx = vp.width() / z
+        r = dock.scene.sceneRect()
+        content = dock._content_rect()
+        # 视口左上角最大 = sceneRect.right - W = content.right，
+        # 此刻视口左边缘 == 最右节点右边缘 → 该节点刚好完全不显示
+        viewport_left_at_max = r.right() - mx
+        self.assertAlmostEqual(viewport_left_at_max, content.right(), delta=2)
+        rightmost = max(n.x + 218.0 for n in dock.data.nodes.values())
+        self.assertAlmostEqual(content.right(), rightmost, delta=2)
+
+    def test_drag_node_outside_does_not_recurse(self):
+        """拖节点出视口再拖回不应因 sceneRect 连锁回调无限递归爆栈。
+
+        回归：setSceneRect→scrollContentsBy→itemChange→on_node_moved→
+        remember_position→_ensure_scene_rect→setSceneRect…（_scene_rect_syncing 锁）。
+        """
+        from PySide6.QtCore import QPointF
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        key = next(iter(dock.data.nodes))
+        for i in range(25):
+            dock.remember_position(key, QPointF(10000 + i * 10, -8000 - i * 5))
+            dock.remember_position(key, QPointF(i * 10, i * 5))
+        self.assertFalse(dock._scene_rect_syncing, "重入锁应在每次调用后复位")
+        self._assert_scene_rect_is_dynamic(dock)
+
+    def test_edge_item_pen_is_cosmetic(self):
+        """细节模式连线笔宽按屏幕像素固定：缩放时线条粗细不变。"""
+        dock = self._setup()
+        item = next(iter(dock.edge_items))
+        import inspect
+        src = inspect.getsource(type(item).paint)
+        self.assertIn("setCosmetic(True)", src,
+                      "EdgeItem 连线笔宽必须 cosmetic，缩放才不变粗/细")
+        # 全局连线层的贝塞尔同样 cosmetic
+        from rwmap.widgets.trigger_graph_dock import _paint_edge_curve
+        self.assertIn("setCosmetic(True)", inspect.getsource(_paint_edge_curve))
+
+    def test_overview_box_draws_above_edges(self):
+        """缩小概览：节点色块 z 必须高于全局连线层（矩形在线条之上）。"""
+        dock = self._setup()
+        dock._enter_overview()
+        self.assertIsNotNone(dock._overview_item)
+        self.assertGreater(dock._overview_item.zValue(), dock.edge_layer.zValue(),
+                           "概览节点矩形应盖在连线之上")
 
     def test_drag_syncs_data_coordinates(self):
         """拖动必须同步数据层坐标，否则连线层 / 视口裁剪仍用旧位置。"""
@@ -555,13 +676,19 @@ class GraphDockTest(unittest.TestCase):
         p = _CountingPainter()
         dock.edge_layer.paint(p, QStyleOptionGraphicsItem(), None)
         self.assertEqual(p.paths, len(missing))
-        # 把视口平移到远离图形处：这些线应被裁剪掉（不再全量重绘）
+        # 把视口移到远离图形处验证裁剪：动态平移范围会把视口 clamp 回节点附近，
+        # 因此这里临时放大 sceneRect 以隔离验证 edge_layer 自身的视口裁剪逻辑。
         dock.view.resetTransform()
-        dock.view.centerOn(1e9, 1e9)
-        p2 = _CountingPainter()
-        dock.edge_layer.paint(p2, QStyleOptionGraphicsItem(), None)
-        self.assertEqual(p2.paths, 0)
-        dock.view.resetTransform()
+        old_rect = dock.scene.sceneRect()
+        try:
+            dock.scene.setSceneRect(old_rect.adjusted(-1e9, -1e9, 1e9, 1e9))
+            dock.view.centerOn(1e9, 1e9)
+            p2 = _CountingPainter()
+            dock.edge_layer.paint(p2, QStyleOptionGraphicsItem(), None)
+            self.assertEqual(p2.paths, 0)
+        finally:
+            dock.scene.setSceneRect(old_rect)
+            dock.view.resetTransform()
 
 
     # ---------------- 叉 / 连线列表 / 空组 ----------------
@@ -860,6 +987,251 @@ class GraphDockTest(unittest.TestCase):
         dock.create_link(dock.data.nodes[k4], dock.data.nodes[k1])
         QApplication.processEvents()
         self.assertEqual(len(self._edge_rows(dock)), rows_before + 1)
+
+    # ---------------- 本轮三项改动 ----------------
+    def test_auto_scroll_is_time_throttled_and_slow(self):
+        """拖到边缘的视口跟随按时间节流、步长变小（窗口不再瞬间窜出去）。"""
+        from PySide6.QtCore import QPoint
+        dock = self._setup()
+        dock.show()
+        QApplication.processEvents()
+        view = dock.view
+        self.assertGreaterEqual(view.AUTO_SCROLL_INTERVAL_MS, 30)
+        self.assertLessEqual(view.AUTO_SCROLL_PX, 6)
+        bar = view.horizontalScrollBar()
+        # 连续两次贴边调用（同一毫秒内）只滚一步，而不是每次事件都滚
+        view._last_auto_scroll_ms = 0
+        bar.setValue(bar.minimum() + 100)
+        view._auto_scroll_paused = False
+        v0 = bar.value()
+        edge = QPoint(view.viewport().width() - 5,
+                      view.viewport().height() // 2)
+        view._auto_scroll_on_drag(edge)
+        v1 = bar.value()
+        view._auto_scroll_on_drag(edge)     # 紧接着第二次：应被节流拦住
+        v2 = bar.value()
+        self.assertGreater(v1, v0)
+        self.assertEqual(v2, v1, "同一节流窗口内不应再次滚动")
+        # 离开边缘后时间戳清零，下次贴边立即响应
+        view._auto_scroll_on_drag(QPoint(200, 200))
+        self.assertEqual(getattr(view, "_last_auto_scroll_ms", 0), 0)
+
+    def test_node_drag_refreshes_edge_clip_box(self):
+        """节点拖动后全局连线层的裁剪盒跟随更新（连线不再凭空消失）。"""
+        from PySide6.QtCore import QPointF, QRectF
+        dock = self._setup()
+        # 造一条 1 -> 2 的连线（1 有 alsoActivate="2, 3"，2 有 whenActivatedIds="1"）
+        e = next(e for e in dock.data.edges
+                 if e.src.endswith("::1") and e.dst.endswith("::2"))
+        eid = id(e)
+        box_before = QRectF(dock.edge_layer._boxes[eid])
+        k1 = next(k for k in dock.data.nodes if k.endswith("::1"))
+        dock.remember_position(k1, QPointF(5000, 5000))
+        box_after = dock.edge_layer._boxes[eid]
+        self.assertNotEqual(box_before, box_after,
+                            "拖动节点后相连边的裁剪盒应更新到新位置")
+        # 新盒必须包住被拖到 (5000,5000) 的节点右缘；旧盒不会覆盖这里
+        self.assertGreaterEqual(box_after.right(), 5000 + 218,
+                                "裁剪盒应扩展到被拖节点的新位置")
+
+    def test_write_positions_relative_to_top_left_and_readback(self):
+        """保存时以左上角对象为(0,0)写相对坐标，读回可恢复布局。"""
+        from PySide6.QtCore import QPointF
+        from rwmap.document.properties import EDITOR_NODE_POS_PROPERTY
+        dock = self._setup()
+        # 手动把 4 个节点摆成已知布局，最左上是 object 1 @ (100, 50)
+        keys = sorted(dock.data.nodes)  # 文档顺序：1,2,3,4
+        layout = [(100, 50), (180, 50), (260, 50), (340, 50)]
+        for k, (x, y) in zip(keys, layout):
+            dock.remember_position(k, QPointF(x, y))
+        n = dock.write_positions_to_properties()
+        self.assertEqual(n, 4)
+        # object 1 是左上角 → (0,0)，其余按相对偏移
+        obj1 = dock.data.nodes[keys[0]].obj
+        obj3 = dock.data.nodes[keys[2]].obj
+        self.assertEqual(obj1.properties.get(EDITOR_NODE_POS_PROPERTY), "0,0")
+        self.assertEqual(obj3.properties.get(EDITOR_NODE_POS_PROPERTY), "160,0")
+        # 对象层被置脏，writer 才会把属性落盘
+        self.assertTrue(dock.doc.layers[0].dirty)
+        # 读回：清空缓存后从属性种子恢复，坐标与写入前一致
+        saved = dock._saved_positions()
+        self.assertEqual(saved[keys[0]], QPointF(0, 0))
+        self.assertEqual(saved[keys[2]], QPointF(160, 0))
+
+    def test_write_positions_noop_when_graph_never_opened(self):
+        """节点图没数据时不写属性，避免误覆盖。"""
+        dock = self._setup()
+        dock.data = None
+        self.assertEqual(dock.write_positions_to_properties(), 0)
+
+    def test_node_pos_property_survives_tmx_roundtrip(self):
+        """位置属性写盘后能被读回：保存→重新读取→属性仍在。"""
+        import tempfile
+        from pathlib import Path
+        from PySide6.QtCore import QPointF
+        from rwmap.io.tmx_writer import write_document
+        from rwmap.io.tmx_reader import read_document
+        from rwmap.document.properties import EDITOR_NODE_POS_PROPERTY
+        from rwmap.document.layer import ObjectLayer
+
+        from rwmap.io.tmx_writer import create_blank_document
+        profile = self.w.state.profile
+        out = Path(tempfile.gettempdir()) / "rwmap_nodepos_roundtrip.tmx"
+        # make_doc 对象是现成的，塞进一张带真实 DOM 的文档才能写盘
+        src = make_doc()
+        doc = create_blank_document(profile, 32, 20, path=out)
+        doc.layers = list(src.layers)
+        doc.rebuild_index()
+        dock = self.w.trigger_graph_dock
+        dock.set_document(doc)
+        dock.refresh(fit=False)
+        keys = sorted(dock.data.nodes)
+        for k, (x, y) in zip(keys, [(100, 50), (180, 50), (260, 50), (340, 50)]):
+            dock.remember_position(k, QPointF(x, y))
+        dock.write_positions_to_properties()
+        write_document(doc, out)
+        try:
+            xml = out.read_text(encoding="utf-8")
+            self.assertIn(f'name="{EDITOR_NODE_POS_PROPERTY}"', xml)
+            re_doc = read_document(out, profile)
+            re_objs = [o for l in re_doc.layers if isinstance(l, ObjectLayer)
+                       for o in l.objects]
+            vals = [o.properties.get(EDITOR_NODE_POS_PROPERTY) for o in re_objs]
+            self.assertIn("0,0", vals)
+            self.assertIn("160,0", vals)
+        finally:
+            out.unlink(missing_ok=True)
+
+    # ---------------- 边缘判定区 + 切层边界 ----------------
+    def test_edge_zone_is_small_and_direction_correct(self):
+        """四周判定区宽度合理（"不要太大"），方向判定正确。"""
+        from PySide6.QtCore import QPoint
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        view = dock.view
+        self.assertLessEqual(view.EDGE_ZONE_PX, 30)
+        self.assertGreaterEqual(view.EDGE_ZONE_PX, 8)
+        vp = view.viewport()
+        self.assertEqual(view._edge_direction(QPoint(2, vp.height() // 2)), (-1, 0))
+        self.assertEqual(view._edge_direction(QPoint(vp.width() - 2, 300)), (1, 0))
+        self.assertEqual(view._edge_direction(QPoint(400, 2)), (0, -1))
+        self.assertEqual(view._edge_direction(QPoint(400, vp.height() - 2)), (0, 1))
+        self.assertEqual(view._edge_direction(QPoint(400, 300)), (0, 0))
+
+    def test_auto_scroll_timer_keeps_scrolling_without_mouse_move(self):
+        """进入判定区后，定时器持续滚动（鼠标不再发 move 事件也一直走）。"""
+        from PySide6.QtCore import QPoint
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        view = dock.view
+        bar = view.horizontalScrollBar()
+        bar.setValue(bar.minimum() + 200)
+        vp = view.viewport()
+        # 模拟拖动中：dragging_key 非空 + 鼠标停在左边缘判定区
+        dock._dragging_key = next(iter(dock.data.nodes))
+        try:
+            view._auto_scroll_on_drag(QPoint(2, vp.height() // 2))
+            self.assertTrue(view._auto_scroll_timer.isActive(),
+                            "进入判定区应启动持续滚动定时器")
+            v_before = bar.value()
+            # 不再调用 mouseMove，连打多次 tick 模拟定时器持续滚动
+            for _ in range(5):
+                view._auto_scroll_tick()
+            self.assertLess(bar.value(), v_before,
+                            "鼠标停住时定时器仍应持续滚动视口")
+        finally:
+            dock._dragging_key = None
+            view._stop_auto_scroll()
+
+    def test_auto_scroll_moves_dragged_node_with_viewport(self):
+        """视口持续滚动时被拖节点同向移动（保持停在鼠标边缘，不被甩在原地）。"""
+        from PySide6.QtCore import QPoint
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        view = dock.view
+        key = next(iter(dock.data.nodes))
+        item = dock.node_items[key]
+        x0 = item.pos().x()
+        bar = view.horizontalScrollBar()
+        bar.setValue(bar.minimum() + 200)
+        dock._dragging_key = key
+        vp = view.viewport()
+        try:
+            view._auto_scroll_on_drag(QPoint(vp.width() - 2, vp.height() // 2))
+            for _ in range(4):
+                view._auto_scroll_tick()
+            self.assertGreater(item.pos().x(), x0,
+                               "向右持续滚动时被拖节点应向右跟随")
+        finally:
+            dock._dragging_key = None
+            view._stop_auto_scroll()
+
+    def test_stop_auto_scroll_on_leave_and_release(self):
+        """离开判定区 / 松手后停止持续滚动。"""
+        from PySide6.QtCore import QPoint
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        view = dock.view
+        vp = view.viewport()
+        dock._dragging_key = next(iter(dock.data.nodes))
+        try:
+            view._auto_scroll_on_drag(QPoint(2, vp.height() // 2))
+            self.assertTrue(view._auto_scroll_timer.isActive())
+            # 离开判定区：停定时器
+            view._auto_scroll_on_drag(QPoint(400, 300))
+            self.assertFalse(view._auto_scroll_timer.isActive())
+            self.assertEqual(view._edge_dir, (0, 0))
+            # 再次进入，再离开（模拟松手路径）
+            view._auto_scroll_on_drag(QPoint(2, vp.height() // 2))
+            self.assertTrue(view._auto_scroll_timer.isActive())
+            view._stop_auto_scroll()
+            self.assertFalse(view._auto_scroll_timer.isActive())
+        finally:
+            dock._dragging_key = None
+            view._stop_auto_scroll()
+
+    def test_scene_rect_follows_current_layer_on_switch(self):
+        """切换对象层后 sceneRect 按新层节点重算，不被旧层手摆位置撑住。"""
+        from PySide6.QtCore import QPointF
+        dock = self._setup()
+        dock.resize(900, 600)
+        dock.show()
+        QApplication.processEvents()
+        # 造第二个对象层（单节点，默认在原点附近）
+        doc = dock.doc
+        from rwmap.document.layer import ObjectLayer
+        from rwmap.document.map_object import MapObject
+        from rwmap.document.properties import PropertyBag
+        extra = ObjectLayer(name="Effects", objects=[
+            MapObject(object_id=99, name="fx", type_="unitAdd", x=0, y=0,
+                      properties=PropertyBag(values={"id": "99"}))])
+        doc.layers.append(extra)
+        dock.refresh(fit=False)
+        QApplication.processEvents()
+        # 当前层（Triggers）某节点手摆到很远 → 内容框被撑大
+        key = next(iter(dock.data.nodes))
+        dock.remember_position(key, QPointF(9000, 9000))
+        dock._ensure_scene_rect()
+        self.assertGreater(dock._content_rect().right(), 8000)
+        # 切到 Effects 层：内容框与 sceneRect 应回到新层节点附近
+        idx = dock.layer_combo.findData("Effects")
+        self.assertGreaterEqual(idx, 0)
+        dock.layer_combo.setCurrentIndex(idx)
+        dock._on_layer_changed()
+        dock._ensure_scene_rect()
+        QApplication.processEvents()
+        self.assertEqual(dock._layer_filter, "Effects")
+        self.assertLess(dock._content_rect().right(), 1000,
+                        "切层后内容框不应被旧层手摆坐标撑住")
+        self._assert_scene_rect_is_dynamic(dock, msg="切层后边界按新层重算")
 
 
 if __name__ == "__main__":

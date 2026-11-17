@@ -207,7 +207,12 @@ class MapView(QGraphicsView):
                     self.pickRequested.emit(col, row)
                 event.accept()
                 return
-            if event.modifiers() & Qt.ControlModifier and self._doc is not None:
+            if (self.object_mode == "brush"
+                    and event.modifiers() & Qt.ControlModifier
+                    and self._doc is not None):
+                # 瓦片画笔模式下 Ctrl+左键仍是「临时点选 / 拖动对象」的快捷入口。
+                # 其它对象工具（rect/select/…）下 Ctrl 是修饰键（吸附 / 按格），
+                # 必须透传给 objectToolPressed，否则 Ctrl+创建对象会被这里吞掉。
                 scene_pos = self.mapToScene(pos)
                 if self._in_bounds(int(scene_pos.x() // self._doc.tile_w),
                                    int(scene_pos.y() // self._doc.tile_h)):

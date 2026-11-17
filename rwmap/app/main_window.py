@@ -403,14 +403,17 @@ class MainWindow(QMainWindow):
         self.act_new_tileset.setToolTip(
             "用一张图集大图生成铁锈瓦片图集（.tsx），在独立标签里逐格调属性")
         self.act_new_tileset.triggered.connect(self._new_tileset)
+        # 这 4 个按钮不再变换整张地图，而是作用于「当前变换目标」：
+        # 选中的插入图片 > 右键框选的图章内容；两者都无时按钮禁用（见
+        # _refresh_transform_actions / _transform_target / _transform_content）。
         self.act_flip_h = QAction("水平翻转", self)
-        self.act_flip_h.triggered.connect(lambda: self._transform_map("flip_h"))
+        self.act_flip_h.triggered.connect(lambda: self._transform_content("flip_h"))
         self.act_flip_v = QAction("垂直翻转", self)
-        self.act_flip_v.triggered.connect(lambda: self._transform_map("flip_v"))
+        self.act_flip_v.triggered.connect(lambda: self._transform_content("flip_v"))
         self.act_rot_cw = QAction("顺时针旋转 90°", self)
-        self.act_rot_cw.triggered.connect(lambda: self._transform_map("rot_cw"))
+        self.act_rot_cw.triggered.connect(lambda: self._transform_content("rot_cw"))
         self.act_rot_ccw = QAction("逆时针旋转 90°", self)
-        self.act_rot_ccw.triggered.connect(lambda: self._transform_map("rot_ccw"))
+        self.act_rot_ccw.triggered.connect(lambda: self._transform_content("rot_ccw"))
         self.act_resize = QAction("调整地图尺寸…", self)
         self.act_resize.triggered.connect(self._resize_map)
 
@@ -519,8 +522,16 @@ class MainWindow(QMainWindow):
         # Tiled 风格：主工具栏与插入对象图标栏排在同一行（版本下拉在最左）。
         self.object_toolbar = ObjectToolBar(self)
         self.addToolBar(Qt.TopToolBarArea, self.object_toolbar)
-        # 地图变换 4 按钮放到对象工具栏最右端（前面带竖线分隔），
-        # 不再占用「地图」菜单。action 仍在 _build_actions 里统一创建。
+        # 变换 4 按钮排在对象工具栏「瓦片画笔」文字之前（图标左、文字右），
+        # 不再占用「地图」菜单。作用于选中图片 / 右键框选的图章，无目标禁用。
+        # action 仍在 _build_actions 里统一创建。
+        for action, tip in (
+            (self.act_flip_h, "翻转选中的插入图片，或右键框选的图章内容（水平镜像）"),
+            (self.act_flip_v, "翻转选中的插入图片，或右键框选的图章内容（垂直镜像）"),
+            (self.act_rot_cw, "旋转选中的插入图片，或右键框选的图章内容（顺时针 90°）"),
+            (self.act_rot_ccw, "旋转选中的插入图片，或右键框选的图章内容（逆时针 90°）"),
+        ):
+            action.setToolTip(tip)
         self.object_toolbar.add_transform_actions([
             (self.act_flip_h, "flip_h"),
             (self.act_flip_v, "flip_v"),
@@ -777,6 +788,9 @@ class MainWindow(QMainWindow):
         self.view.objectToolDoubleClicked.connect(self._on_object_tool_double_click)
         self.view.objectToolCancelled.connect(self._cancel_object_tool)
         self.view.objectHover.connect(self._on_object_hover)
+        # 选中变化 → 刷新 4 个变换按钮的启用态
+        self.scene.objectSelectionChanged.connect(
+            lambda _objs: self._refresh_transform_actions())
         # 钢笔右键序列（其余对象工具收到后由 handler 首行直接忽略）
         self.view.objectToolRightPressed.connect(self._pen_right_press)
         self.view.objectToolRightMoved.connect(self._pen_right_move)
@@ -970,6 +984,7 @@ class MainWindow(QMainWindow):
         self.trigger_graph_dock.set_document(
             doc, self.state.undo_stack, self._refresh_objects)
         self.object_toolbar.set_document(doc)
+        self._refresh_transform_actions()   # 切文档后目标可能已消失，按钮回暗
         # 迷你地图：绑定当前视图，并跟随激活文档的编辑（防抖重渲染）。
         self.minimap_dock.minimap.set_view(self.view)
         self.minimap_dock.minimap.set_document(doc)
@@ -1139,6 +1154,20 @@ class MainWindow(QMainWindow):
         mark = " *" if doc is not None and doc.dirty else ""
         self.setWindowTitle(f"{name}{mark} — 铁锈战争地图编辑器 [{self.state.profile.version_id}]")
 
+    def _flush_graph_positions(self):
+        """保存前把节点图布局写进对象位置属性（仅保存时，不入撤销栈）。
+
+        节点图没打开过（data 为空）或文档类型不匹配时直接跳过。写入只碰私有
+        属性并把相关对象层置 dirty，交给本次 write_document 一起落盘。
+        """
+        dock = getattr(self, "trigger_graph_dock", None)
+        if dock is None or dock.doc is not self.state.doc:
+            return
+        try:
+            dock.write_positions_to_properties()
+        except Exception:  # noqa: BLE001 - 位置记录失败不该阻断地图保存
+            pass
+
     def _save(self):
         if getattr(self.state, "kind", "map") == "tileset" and \
                 self.state.tileset_doc is not None:
@@ -1153,6 +1182,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("为避免覆盖官方地图，已转为「另存为」")
             self._save_as()
             return
+        self._flush_graph_positions()
         path = self.state.doc.save()
         self._update_title()
         self.statusBar().showMessage(f"已保存 {path}")
@@ -1169,6 +1199,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         target = as_path(path)
+        self._flush_graph_positions()
         try:
             result = export_map(
                 self.state.doc, target.parent, self.state.profile,
@@ -1274,8 +1305,10 @@ class MainWindow(QMainWindow):
         stamp = [[layer.get(c, r) for c in range(c0, c1 + 1)]
                  for r in range(r0, r1 + 1)]
         self.state.stamp = stamp                  # 保留 raw gid（含翻转标志）
+        self._refresh_transform_actions()
         self.statusBar().showMessage(
-            f"已抓取 {len(stamp[0])}x{len(stamp)} 格区域作图章（左键印下）"
+            f"已抓取 {len(stamp[0])}x{len(stamp)} 格区域作图章"
+            "（翻转/旋转按钮已点亮，左键印下）"
         )
 
     # ---- 右键单击拾取当前层单格（严格当前层，空则不拾取）----
@@ -1291,14 +1324,17 @@ class MainWindow(QMainWindow):
             return
         self.state.brush_gid = raw                # 保留翻转标志
         self.state.stamp = None                   # 退回单格画笔
+        self._refresh_transform_actions()
         self.tilesets_dock.select_gid(gid)        # 图块集面板高亮对应图集+瓦片
         self.statusBar().showMessage(f"右键拾取 @({col},{row}) → gid={gid}")
 
     def _on_stamp(self, gids):
         self.state.stamp = gids
+        self._refresh_transform_actions()
         if gids:
             self.statusBar().showMessage(
-                f"图块选区 {len(gids[0])}x{len(gids)} 格（画布上可一次盖章）"
+                f"图块选区 {len(gids[0])}x{len(gids)} 格"
+                "（画布上可一次盖章，翻转/旋转按钮已点亮）"
             )
 
     def _on_tileset_settings(self, ts):
@@ -1643,6 +1679,7 @@ class MainWindow(QMainWindow):
                 "点曲线插入锚点、点线外空白完成盖章；Esc 取消，Delete 删末点"),
         "fill": "填充：把点击格所在的同色连通区域一次性替换为当前笔刷（F）",
         "select": ("选择 / 框选：点对象选中 / 拖动 / 拖箭头缩放，拖空白框选；"
+                   "拖动时 Ctrl 按格移动、Ctrl+箭头吸附瓦片边、Shift+箭头等比例；"
                    "瓦片层框选可 Ctrl+C / Ctrl+V / 拖动移动（S / M）"),
         "nodes": "编辑节点：先选中多边形 / 折线，再拖动顶点",
         "rect": "插入矩形：在画布上拖出大小（不拖则 40×40）",
@@ -1677,7 +1714,7 @@ class MainWindow(QMainWindow):
             self.scene.set_show_object_nodes(False)
             self.view.setCursor(self.state.tool.cursor)
             self.statusBar().showMessage(
-                f"工具: {self.state.tool.name}；对象默认自由摆放，按 Shift 才吸附网格")
+                f"工具: {self.state.tool.name}；对象默认自由摆放，Ctrl 吸附网格 / Shift 正方形")
             return
         self._object_tool = tid
         self.view.object_mode = tid
@@ -1721,21 +1758,40 @@ class MainWindow(QMainWindow):
                     if isinstance(l, ObjectLayer) for o in l.objects),
                    default=0) + 1
 
+    @staticmethod
+    def _mods():
+        """当前键盘修饰键（集中一处，便于 Ctrl / Shift 语义切换与测试）。"""
+        return QApplication.keyboardModifiers()
+
     def _snap_xy(self, x, y, snap: bool | None = None):
-        """默认自由坐标；只有按住 Shift（或显式 snap=True）才吸附瓦片网格。
+        """默认自由坐标；按住 Ctrl（或显式 snap=True）才吸附瓦片网格角点。
 
         铁锈战争的触发器对象并不要求落在整格上，Tiled 也是默认自由、
         需要对齐时才按修饰键。之前无条件 round 到 20px 会让矩形四角
         永远贴在瓦片边上，看起来像被「绑住」。
+
+        修饰键语义（本轮重做）：
+        - Ctrl：插入对象时把角点吸附到瓦片网格；拖缩放箭头时也吸附，但
+          走 _do_selection_resize 里「吸附目标边」的专门逻辑（不是位移取整）；
+        - Shift：插入时约束为正方形、拖箭头时等比例缩放（见 _square_xy /
+          _do_selection_resize）。
         """
         if snap is None:
-            snap = bool(QApplication.keyboardModifiers() & Qt.ShiftModifier)
+            snap = bool(self._mods() & Qt.ControlModifier)
         if not snap:
             return x, y
         doc = self.state.doc
         tw = doc.tile_w if doc is not None else 20
         th = doc.tile_h if doc is not None else 20
         return round(x / tw) * tw, round(y / th) * th
+
+    def _square_xy(self, x0, y0, x1, y1):
+        """插入拖动终点：按住 Shift 时把矩形约束成正方形（取较大边长）。"""
+        if not (self._mods() & Qt.ShiftModifier):
+            return x1, y1
+        side = max(abs(x1 - x0), abs(y1 - y0))
+        return (x0 + side if x1 >= x0 else x0 - side,
+                y0 + side if y1 >= y0 else y0 - side)
 
     def _commit_new_object(self, layer, obj, label):
         doc = self.state.doc
@@ -1844,8 +1900,9 @@ class MainWindow(QMainWindow):
         if pending["kind"] == "poly":
             self._poly_preview(pending, sx, sy)
         elif pending["kind"] == "drag":
+            px, py = self._square_xy(pending["x0"], pending["y0"], sx, sy)
             self.scene.set_object_preview(self._preview_object(
-                pending["tool"], pending["x0"], pending["y0"], sx, sy,
+                pending["tool"], pending["x0"], pending["y0"], px, py,
                 pending.get("extra")))
 
     def _on_object_tool_release(self, x: float, y: float):
@@ -1880,6 +1937,7 @@ class MainWindow(QMainWindow):
         doc = self.state.doc
         x0, y0 = pending["x0"], pending["y0"]
         sx, sy = self._snap_xy(x, y)
+        sx, sy = self._square_xy(x0, y0, sx, sy)
         left, top = min(x0, sx), min(y0, sy)
         w, h = abs(sx - x0), abs(sy - y0)
         defaults = {
@@ -2824,11 +2882,94 @@ class MainWindow(QMainWindow):
         self.state.undo_stack.push(cmd)
         self.statusBar().showMessage(f"图层已重命名为 {name}")
 
-    # ---------------- 地图变换（翻转 / 旋转 / 新建 / 改尺寸） ----------------
+    # ---------------- 内容变换（翻转 / 旋转）：图章内容 / 插入图片 ----------------
     def _can_transform(self) -> bool:
         return (self.state.doc is not None
                 and self.state.profile.write_enabled)
 
+    def _transform_target(self):
+        """返回当前变换目标 ``(kind, payload)``，无目标返回 None。
+
+        优先级：选中的插入图片 > 右键框选的图章内容。
+        - 图片：kind="image"，payload=选中对象里的 image 对象列表（≥1）；
+        - 图章：kind="stamp"，payload=state.stamp（2D raw gid 矩阵）。
+        """
+        images = [o for o in self.scene.selected_objects
+                  if getattr(o, "shape", "") == "image"]
+        if images:
+            return "image", images
+        stamp = getattr(self.state, "stamp", None)
+        if stamp and stamp[0]:
+            return "stamp", stamp
+        return None
+
+    def _refresh_transform_actions(self):
+        """有变换目标才点亮 4 个按钮；否则禁用（暗色、点击无反应）。"""
+        enabled = self._can_transform() and self._transform_target() is not None
+        for action in self.object_toolbar._transform_actions:
+            action.setEnabled(enabled)
+
+    def _transform_content(self, op: str):
+        """4 个按钮的分发入口：按当前目标变换图片或图章内容。"""
+        target = self._transform_target()
+        if target is None or not self._can_transform():
+            return
+        kind, payload = target
+        if kind == "image":
+            self._transform_images(payload, op)
+        else:
+            self._transform_stamp(op)
+
+    def _transform_images(self, images, op: str):
+        """翻转 / 旋转选中的插入图片：翻转改标志位，旋转改 rotation 并交换宽高。"""
+        from ..commands.object_command import capture, push_object_edit
+        layers = self._layers_of_objects(images)
+        before = capture(layers)
+        for obj in images:
+            if op == "flip_h":
+                obj.image_flip_h = not obj.image_flip_h
+            elif op == "flip_v":
+                obj.image_flip_v = not obj.image_flip_v
+            elif op in ("rot_cw", "rot_ccw"):
+                obj.rotation = (obj.rotation + (90 if op == "rot_cw" else -90)) % 360
+                # 90° 旋转：图片外接框宽高互换，中心保持不动。
+                cx = obj.x + obj.width / 2.0
+                cy = obj.y + obj.height / 2.0
+                obj.width, obj.height = obj.height, obj.width
+                obj.x, obj.y = cx - obj.width / 2.0, cy - obj.height / 2.0
+        self._refresh_moved_objects(images)
+        pushed = push_object_edit(
+            self.state.doc, self.state.undo_stack, before,
+            {"flip_h": "水平翻转图片", "flip_v": "垂直翻转图片",
+             "rot_cw": "顺时针旋转图片", "rot_ccw": "逆时针旋转图片"}[op],
+            self._refresh_objects)
+        self.scene.set_selected_objects(list(images))
+        self._refresh_transform_actions()
+        label = {"flip_h": "水平翻转", "flip_v": "垂直翻转",
+                 "rot_cw": "顺时针旋转 90°", "rot_ccw": "逆时针旋转 90°"}[op]
+        self.statusBar().showMessage(
+            f"{label} {len(images)} 张图片"
+            + ("（Ctrl+Z 可撤销）" if pushed else "（无变化）"))
+
+    def _transform_stamp(self, op: str):
+        """翻转 / 旋转右键框选的图章内容（2D raw gid 矩阵）。"""
+        from ..rw.transform import transform_stamp
+        old = self.state.stamp
+        if not old or not old[0]:
+            return
+        self.state.stamp = transform_stamp(old, op)
+        # 刷新画布上的图章虚影（若正在预览）：沿用当前预览的锚点行列。
+        rows, cols = len(self.state.stamp), len(self.state.stamp[0])
+        preview = getattr(self.scene, "_stamp_preview", None)
+        if preview is not None:
+            self.scene.set_stamp_preview(self.state.stamp, preview.col, preview.row)
+        self._refresh_transform_actions()
+        label = {"flip_h": "水平翻转", "flip_v": "垂直翻转",
+                 "rot_cw": "顺时针旋转 90°", "rot_ccw": "逆时针旋转 90°"}[op]
+        self.statusBar().showMessage(
+            f"{label}图章内容 → {cols}x{rows} 格（左键印下）")
+
+    # ---------------- 地图变换（新建 / 改尺寸，翻转旋转已移到内容变换） ----------------
     def _transform_map(self, op: str):
         if not self._can_transform():
             self.statusBar().showMessage("当前版本只读，无法变换地图")
@@ -3227,10 +3368,18 @@ class MainWindow(QMainWindow):
 
     # ---------------- 选中框的 8 个缩放箭头 ----------------
     def _selection_handle_at(self, x: float, y: float):
-        """返回鼠标命中的黄色缩放箭头名；没有选中 / 没命中返回 None。"""
+        """返回鼠标命中的黄色缩放箭头名；没有选中 / 没命中返回 None。
+
+        点对象没有尺寸、不可缩放：纯点选区不提供箭头（连整体框也不画箭头），
+        因此拖点对象只会移动、不会进入缩放状态。
+        """
         from ..view.object_layer_item import handle_hit_arrow
         box = self._obj_selection_box()
-        if box is None or not self.scene.selected_objects:
+        objs = self.scene.selected_objects
+        if box is None or not objs:
+            return None
+        # 只要选区里混有任意非点对象就仍可整组缩放；纯点选区禁止缩放。
+        if all(getattr(o, "shape", None) == "point" for o in objs):
             return None
         scale = abs(self.view.transform().m11()) or 1.0
         return handle_hit_arrow(box, x, y, scale)
@@ -3280,30 +3429,65 @@ class MainWindow(QMainWindow):
         }
         self.view.setCursor(_RESIZE_CURSORS.get(handle, Qt.SizeAllCursor))
         self.statusBar().showMessage(
-            f"拖动缩放箭头「{handle}」（按住 Shift 吸附网格，Esc 取消）")
+            f"拖动缩放箭头「{handle}」（Ctrl 吸附瓦片边，Shift 等比例，Esc 取消）")
 
     def _do_selection_resize(self, x: float, y: float, drag=None):
         drag = drag if drag is not None else self._sel_resize_drag
         if drag is None or self.state.doc is None:
             return
         name, box = drag["handle"], drag["box"]
-        # 起点与终点用同一套吸附规则，中途按 / 松 Shift 也不会跳变。
-        ox, oy = self._snap_xy(drag["sx"], drag["sy"])
-        tx, ty = self._snap_xy(x, y)
-        dx, dy = tx - ox, ty - oy
         left, top, right, bottom = (box.left(), box.top(),
                                     box.right(), box.bottom())
         min_w, min_h = min(8.0, box.width()), min(8.0, box.height())
+        # 修订：Ctrl 吸附的是「被拖的那条边最终落在哪条瓦片线上」，不是
+        # 「位移量取整成整格」。旧实现把按下点与鼠标点分别 round 后相减，
+        # 只是让对象一格一格地跳；若矩形四边本来就不在瓦片边上，拖完仍是
+        # 悬在瓦片中间（用户反馈的「只移动了一格，没吸附」）。
+        # 新算法：先用自由位移算出目标边，再把目标边吸附到最近的网格线；
+        # 未被拖的对边保持原样，所以轻微拖动也会先把这条边吸到最近交叉点。
+        dx, dy = x - drag["sx"], y - drag["sy"]
+        snap = bool(self._mods() & Qt.ControlModifier)
+        tw = self.state.doc.tile_w if self.state.doc else 20
+        th = self.state.doc.tile_h if self.state.doc else 20
+
+        def snapped(v, step):
+            return round(v / step) * step
+
         if name in ("nw", "w", "sw"):
-            left = min(left + dx, right - min_w)
+            nv = left + dx
+            left = min(snapped(nv, tw) if snap else nv, right - min_w)
         if name in ("ne", "e", "se"):
-            right = max(right + dx, left + min_w)
+            nv = right + dx
+            right = max(snapped(nv, tw) if snap else nv, left + min_w)
         if name in ("nw", "n", "ne"):
-            top = min(top + dy, bottom - min_h)
+            nv = top + dy
+            top = min(snapped(nv, th) if snap else nv, bottom - min_h)
         if name in ("sw", "s", "se"):
-            bottom = max(bottom + dy, top + min_h)
+            nv = bottom + dy
+            bottom = max(snapped(nv, th) if snap else nv, top + min_h)
         fx = (right - left) / max(box.width(), 1e-6)
         fy = (bottom - top) / max(box.height(), 1e-6)
+        # Shift = 等比例缩放：以拖动位移较大的轴为准，另一轴按同一比例，
+        # 固定边（对角 / 对边）保持不动。角手柄两轴都动，边手柄只动一轴。
+        if self._mods() & Qt.ShiftModifier:
+            f = fx if abs(fx - 1.0) >= abs(fy - 1.0) else fy
+            w2, h2 = box.width() * f, box.height() * f
+            cx, cy = (box.left() + box.right()) / 2, (box.top() + box.bottom()) / 2
+            # 水平：拖左边则右边固定，拖右边则左边固定，上下边手柄水平居中扩展。
+            if name in ("nw", "w", "sw"):
+                left = box.right() - w2
+            elif name in ("ne", "e", "se"):
+                right = box.left() + w2
+            else:                                   # n / s
+                left, right = cx - w2 / 2, cx + w2 / 2
+            # 垂直：拖上边则下边固定，拖下边则上边固定，左右边手柄垂直居中扩展。
+            if name in ("nw", "n", "ne"):
+                top = box.bottom() - h2
+            elif name in ("sw", "s", "se"):
+                bottom = box.top() + h2
+            else:                                   # e / w
+                top, bottom = cy - h2 / 2, cy + h2 / 2
+            fx = fy = f
         for (o, ax, ay, aw, ah, pts, bx, by, bw, bh) in drag["base"]:
             nx = left + (bx - box.left()) * fx
             ny = top + (by - box.top()) * fy
@@ -3369,7 +3553,7 @@ class MainWindow(QMainWindow):
             # 拖动前先给涉及的每个对象层拍快照：松手时一次性登记成一条撤销。
             "before": capture(self._layers_of_objects(objs)),
         }
-        self.statusBar().showMessage("拖动移动选中对象（按住 Shift 按格移动）")
+        self.statusBar().showMessage("拖动移动选中对象（按住 Ctrl 按格移动）")
 
     def _do_selection_move(self, x, y):
         drag = self._sel_move_drag
@@ -3377,7 +3561,7 @@ class MainWindow(QMainWindow):
             return
         dx = x - drag["sx"]
         dy = y - drag["sy"]
-        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+        if self._mods() & Qt.ControlModifier:
             tw = self.state.doc.tile_w
             th = self.state.doc.tile_h
             dx = round(dx / tw) * tw
