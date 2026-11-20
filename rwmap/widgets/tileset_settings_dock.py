@@ -7,8 +7,8 @@
   面板的位置，现在换成更有用的逐格属性编辑。
 
 标题栏复用 dock_chrome；`TilesetPropsDock`（图集设置）用「统一底色」
-主题（标题栏 + 内容 + 底部按钮行全部 INK，`install_title_bar(light=True)`）
-并去掉 QDockWidget 最外层边框，其余面板仍保持 ASH 深色标题栏。
+主题（标题栏 + 内容 + 底部按钮行全部 INK，`install_title_bar(light=True)`）。
+所有面板（含本面板）外框统一 1px ASH 暗线，沿用 theme.PANEL_BORDER_QSS。
 两块都只在「图集任务」里出现（地图任务隐藏）。
 """
 from __future__ import annotations
@@ -17,6 +17,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QDockWidget, QVBoxLayout, QWidget
 
 from ..document.tileset import Tileset
+from ..theme import PANEL_BORDER_QSS
 from .dock_chrome import install_title_bar
 from .tileset_editor import TilePropertyEditor
 from .tileset_settings_panel import PANEL_BG, TilesetPropsPanel, apply_panel_bg
@@ -32,10 +33,11 @@ class TilesetPropsDock(QDockWidget):
         self.ts: Tileset | None = None
         self.doc = None
         self.undo_stack = None
-        # 去掉 QDockWidget 最外层那圈边框（用户要求）。dock 自身、holder、
-        # 面板三层都要显式填同一个底色：自定义 QWidget 子类不会自动绘制
+        # 三层都要显式填同一个底色：自定义 QWidget 子类不会自动绘制
         # 样式表 background，少一层就会露出主窗口的深色（底部黑条）。
-        self.setStyleSheet(f"QDockWidget{{background:{PANEL_BG};border:0;}}")
+        # 外框按全面板统一规则加 2px 暗线。
+        self.setStyleSheet(
+            f"QDockWidget{{background:{PANEL_BG};{PANEL_BORDER_QSS}}}")
         apply_panel_bg(self)
 
         self.panel = TilesetPropsPanel()

@@ -17,10 +17,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QSpinBox, QVBoxLayout,
+    QVBoxLayout,
 )
 
 from ..commands.document_command import AddExternalTilesetCommand
+from ..widgets.plain_spinbox import PlainSpinBox
 from ..io.tsx_reader import read_tsx
 from ..io.tmx_writer import create_blank_document
 from ..theme import TEXT_DIM
@@ -104,7 +105,7 @@ class NewMapDialog(QDialog):
         self.resize(560, 560)
 
         def spin(value, lo, hi):
-            s = QSpinBox(self)
+            s = PlainSpinBox(self)
             s.setRange(lo, hi)
             s.setValue(value)
             s.setSuffix(" 块")

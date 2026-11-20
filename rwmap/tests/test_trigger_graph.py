@@ -175,6 +175,47 @@ class GraphDockTest(unittest.TestCase):
         self.assertIsInstance(self.w.trigger_graph_dock, QDockWidget)
         self.assertFalse(hasattr(self.w, "triggers_dock"))
 
+    def test_top_level_windows_suppress_empty_context_menu(self):
+        """右键拖动后一闪而过的空框 = 冒泡到顶层的原生空菜单。
+
+        右键释放的 QContextMenuEvent 会沿 viewport→view→…→顶层一路冒泡，
+        即便各视图都是 NoContextMenu，只要顶层还是默认策略就会弹空菜单。
+        因此 QMainWindow 与浮动 dock 自身都必须是 NoContextMenu。
+        """
+        from PySide6.QtCore import Qt
+        dock = self._setup()
+
+        self.assertEqual(self.w.contextMenuPolicy(), Qt.NoContextMenu,
+                         "QMainWindow 顶层不能弹默认空右键菜单")
+        self.assertEqual(dock.contextMenuPolicy(), Qt.NoContextMenu,
+                         "浮动 dock 作为顶层窗口也不能弹默认空右键菜单")
+
+    def test_select_nodes_spawns_no_untitled_toplevel_windows(self):
+        """选中节点、重建属性面板时不得闪出无标题顶层窗。
+
+        真凶不是 tooltip，而是属性行的 vhint 在 addWidget 之前 setVisible(True)
+        （parent=None 会被 Qt 当顶层窗口显示）。这里从实际选中路径回归。
+        """
+        dock = self._setup()
+
+        from rwmap.widgets.trigger_graph_dock import NodeItem
+        nodes = [it for it in dock.scene.items() if isinstance(it, NodeItem)]
+        self.assertTrue(nodes, "测试文档应含节点")
+
+        # 先渲染一次稳定基线，再反复选中记录新增的可见顶层窗
+        nodes[0].setSelected(True)
+        QApplication.processEvents()
+        base = {id(w) for w in QApplication.topLevelWidgets()}
+        for it in nodes:
+            it.setSelected(True)
+            QApplication.processEvents()
+        leaked = [w for w in QApplication.topLevelWidgets()
+                  if id(w) not in base and w.isVisible()
+                  and (w.windowTitle() or "").strip() == ""]
+        self.assertEqual(leaked, [],
+                         "选中节点冒出无标题顶层窗: %r"
+                         % [type(w).__name__ for w in leaked])
+
     def test_settings_toggle_opens_independent_window(self):
         dock = self.w.trigger_graph_dock
         self.assertTrue(dock.isHidden())
@@ -351,6 +392,10 @@ class GraphDockTest(unittest.TestCase):
                          "不应再存在 _join_group_menu 弹窗逻辑")
         from PySide6.QtCore import Qt
         self.assertEqual(dock.view.contextMenuPolicy(), Qt.NoContextMenu)
+        # 用户反馈：右键拖动框选结束会闪一个空白小窗。根因是鼠标事件实际
+        # 落在 viewport 子控件上，它默认 DefaultContextMenu，必须一并关掉。
+        self.assertEqual(dock.view.viewport().contextMenuPolicy(),
+                         Qt.NoContextMenu)
 
     def test_hidden_dock_builds_all_nodes(self):
         """虚拟化契约：面板隐藏（如单元测试 offscreen）时构建全部节点，行为与旧版一致。"""
@@ -1103,6 +1148,21 @@ class GraphDockTest(unittest.TestCase):
             out.unlink(missing_ok=True)
 
     # ---------------- 边缘判定区 + 切层边界 ----------------
+    def test_edge_zone_visual_hidden_but_function_kept(self):
+        """判定区按用户要求隐藏：paintEvent 不再画四条半透明边条，
+        但边缘持续滚动的功能逻辑（宽度常量 / 方向判定）必须保留。"""
+        import inspect
+        dock = self._setup()
+        view = dock.view
+        # 功能保留
+        self.assertGreaterEqual(view.EDGE_ZONE_PX, 8)
+        self.assertTrue(callable(getattr(view, "_edge_direction", None)))
+        self.assertTrue(callable(getattr(view, "_auto_scroll_tick", None)))
+        # 视觉隐藏：paintEvent 源码不再出现画边条的 fillRect / 半透明色
+        src = inspect.getsource(type(view).paintEvent)
+        self.assertNotIn("fillRect", src, "判定区边条不应再被绘制")
+        self.assertNotIn("120, 180, 255", src)
+
     def test_edge_zone_is_small_and_direction_correct(self):
         """四周判定区宽度合理（"不要太大"），方向判定正确。"""
         from PySide6.QtCore import QPoint
@@ -1232,6 +1292,91 @@ class GraphDockTest(unittest.TestCase):
         self.assertLess(dock._content_rect().right(), 1000,
                         "切层后内容框不应被旧层手摆坐标撑住")
         self._assert_scene_rect_is_dynamic(dock, msg="切层后边界按新层重算")
+
+
+class BoxSelectPerformanceTest(unittest.TestCase):
+    """右键框选 N 个节点时，选中回调与属性面板重建必须只跑 1 次。
+
+    旧实现逐个 setSelected(True)，每个都触发 scene.selectionChanged →
+    _on_selection_changed → 全量重建属性面板 + 回主画布刷新选中手柄。
+    框住 N 个就跑 N 次整条链，对象一多明显卡顿。修复后批量 blockSignals，
+    循环结束统一回调一次，选中结果不变。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.w = MainWindow(auto_open=False)
+
+    def tearDown(self):
+        self.w.trigger_graph_dock.hide()
+        self.w.act_trigger_graph.setChecked(False)
+        apply_default_layout(self.w)
+
+    def _build_dock(self, count):
+        dock = self.w.trigger_graph_dock
+        dock.hide()
+        dock.view.resetTransform()
+        dock._exit_overview()
+        dock.search_edit.clear()
+        dock._group_page = ""
+        dock._empty_groups.clear()
+        objs = [
+            MapObject(object_id=i, name=f"n{i}", type_="unitAdd", shape="point",
+                      x=(i % 20) * 30, y=(i // 20) * 30,
+                      properties=_bag(id=str(i)))
+            for i in range(1, count + 1)
+        ]
+        doc = MapDocument(width=64, height=64,
+                          layers=[ObjectLayer(name="Triggers", objects=objs)])
+        dock.set_document(doc)
+        dock.refresh(fit=False)
+        QApplication.processEvents()
+        return dock
+
+    def _box_select_all(self, dock):
+        """构造一个覆盖全部节点的右键选框并释放，返回框内节点数。"""
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QGraphicsRectItem
+
+        items = list(dock.node_items.values())
+        self.assertGreater(len(items), 1, "测试文档应含多个节点")
+        rect = items[0].sceneBoundingRect()
+        for it in items[1:]:
+            rect = rect.united(it.sceneBoundingRect())
+        rect.adjust(-5, -5, 5, 5)
+        band = QGraphicsRectItem(rect)
+        dock.scene.addItem(band)
+        dock.view._band = band
+        ev = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(0, 0),
+                         Qt.RightButton, Qt.RightButton, Qt.NoModifier)
+        dock.view.mouseReleaseEvent(ev)
+        return len(items)
+
+    def test_single_callback_for_few_and_many_nodes(self):
+        for count in (4, 60):
+            with self.subTest(count=count):
+                dock = self._build_dock(count)
+                with patch.object(dock, "_on_selection_changed",
+                                  wraps=dock._on_selection_changed) as cb, \
+                     patch.object(dock.inspector, "show_node",
+                                  wraps=dock.inspector.show_node) as sh:
+                    n = self._box_select_all(dock)
+                self.assertEqual(cb.call_count, 1,
+                                 f"框选 {n} 个节点只应触发 1 次选中回调，实际 {cb.call_count}")
+                self.assertEqual(sh.call_count, 1,
+                                 f"属性面板只应重建 1 次，实际 {sh.call_count}")
+
+    def test_all_nodes_are_still_selected(self):
+        """批量 blockSignals 后选中结果必须与逐个 setSelected 完全一致。"""
+        dock = self._build_dock(40)
+        n = self._box_select_all(dock)
+        selected = [i for i in dock.scene.selectedItems()
+                    if hasattr(i, "node")]
+        self.assertEqual(len(selected), n,
+                         f"框选应选中全部 {n} 个节点，实际 {len(selected)}")
+        self.assertEqual(len(dock._selected_keys), n)
 
 
 if __name__ == "__main__":

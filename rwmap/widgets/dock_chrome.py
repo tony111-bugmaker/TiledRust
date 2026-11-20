@@ -7,7 +7,9 @@
 - 左上角标题的字号、粗细、颜色；
 - 右上角「浮动 / 关闭」两个按钮的图标（直接取 Qt 原生 Dock 按钮的 QIcon）、
   图标尺寸、按钮尺寸、悬浮/按下反馈；
-- 双击标题栏切换浮动（弥补自定义标题栏取代系统标题栏后的原生行为）。
+- 双击标题栏切换浮动（弥补自定义标题栏取代系统标题栏后的原生行为）；
+- 覆盖整个面板的 1px ASH 描边（QSS 的 QDockWidget 边框在停靠态不渲染，
+  因此用透明子控件统一画，鼠标事件完全穿透）。
 
 样式写法注意：`setStyleSheet()` 里的**选择器规则不会可靠地作用到子控件**，
 所以每个控件（标题栏本体 / QLabel / QToolButton / 树 / 按钮）都各自设样式，
@@ -19,14 +21,16 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEvent, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QHBoxLayout, QHeaderView, QLabel, QListWidget,
     QPushButton, QStyle, QToolButton, QTreeWidget, QWidget,
 )
 
-from ..theme import ASH, INK, TEXT, TEXT_DIM
+from ..theme import (
+    ASH, INK, PANEL_BORDER_COLOR, PANEL_BORDER_PX, TEXT, TEXT_DIM,
+)
 
 # ---- 统一常量（改一处，5 个面板一起变） ----
 # 界面区分色收敛为双色：INK（近黑，底层） + ASH（偏黑灰，抬起层）。
@@ -215,6 +219,55 @@ class DockTitleBar(QWidget):
         super().mouseDoubleClickEvent(event)
 
 
+class DockBorder(QWidget):
+    """覆盖整个面板的 1px ASH 描边层。
+
+    QSS 里的 ``QDockWidget { border: ... }`` 在停靠状态下不一定被 Qt 真正画出，
+    因此统一标题栏安装时再挂一层透明子控件：只画边框、鼠标完全穿透，
+    面板缩放 / 浮动 / 停靠时跟随 dock 的 rect。
+    """
+
+    def __init__(self, dock: QDockWidget):
+        super().__init__(dock)
+        self.setObjectName("DockBorder")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._dock = dock
+        dock.installEventFilter(self)
+        self.setGeometry(dock.rect())
+
+    def eventFilter(self, obj, event):
+        if obj is self._dock and event.type() in (
+                QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Move):
+            self.setGeometry(self._dock.rect())
+            self.raise_()
+        return super().eventFilter(obj, event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        color = QColor(PANEL_BORDER_COLOR)
+        w = self.width()
+        h = self.height()
+        line = PANEL_BORDER_PX
+        # 实心矩形而非 QPen 描边：1px 时也能精确占满最外圈像素，不会被
+        # 半像素对齐吃掉或抗锯齿成灰边。
+        painter.fillRect(0, 0, w, line, color)
+        painter.fillRect(0, h - line, w, line, color)
+        painter.fillRect(0, 0, line, h, color)
+        painter.fillRect(w - line, 0, line, h, color)
+        painter.end()
+
+
+def install_dock_border(dock: QDockWidget) -> DockBorder:
+    """幂等安装统一描边层；所有面板共用，新增面板调用一次即可。"""
+    border = dock.findChild(DockBorder, "DockBorder")
+    if border is None:
+        border = DockBorder(dock)
+    border.raise_()
+    return border
+
+
 def install_title_bar(dock: QDockWidget, title: str | None = None,
                      light: bool = False) -> DockTitleBar:
     """给任意 QDockWidget 装统一标题栏；重复调用不会叠加。
@@ -227,11 +280,13 @@ def install_title_bar(dock: QDockWidget, title: str | None = None,
     if isinstance(bar, DockTitleBar):
         if title is not None:
             bar.set_title(title)
+        install_dock_border(dock)
         return bar
     bar = DockTitleBar(dock, title if title is not None else dock.windowTitle(), light)
     dock.setTitleBarWidget(bar)
     dock.btn_float = bar.btn_float
     dock.btn_close = bar.btn_close
+    install_dock_border(dock)
     return bar
 
 

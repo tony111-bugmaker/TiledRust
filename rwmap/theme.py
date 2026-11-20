@@ -1,7 +1,8 @@
 """全局双色主题（暗色模式）。
 
-用户需求：暗色模式里只保留两种颜色 —— 一个黑色（近黑 #1e1e1e）和一个偏黑的
+用户需求：暗色模式只保留两种颜色 —— 一个黑色（近黑 #1e1e1e）和一个偏黑的
 灰色（#2a2e34），所有界面区分都靠这两个色 + 深浅/透明度来做。
+2026-11-18 面板边界线定为 1px，使用两色里较浅的暗色 ASH，不新增第三种色。
 
 为什么文字不在这两个色里
 ------------------------
@@ -14,11 +15,14 @@
 
 **功能彩色**（触发器连线按类型着色、对象标注框、选择虚线框、小地图视口框、
 图标本身的彩色）属于"语义信息"，不在双色收敛范围内，保持原样。
+Windows 11 默认强调蓝 ``#0078D4`` 也归入功能彩色，只用于透明度滑杆拖动球、
+单选按钮选中球这类"当前操作点"，不参与面板 / 按钮底色的双色收敛。
 
 常用角色
 --------
 ``INK``   近黑，作为最底层背景（画布外底、面板底、工具栏底）
 ``ASH``   偏黑灰，作为"抬起一层"的表面（输入框、选中项、按钮、边框）
+``WIN11_BLUE`` Win11 默认强调蓝，功能圆球（滑杆拖动球 / 单选选中球）
 ``TEXT``  主文字色（浅色，保证可读）
 ``TEXT_DIM`` 次要文字色
 """
@@ -27,6 +31,14 @@ from __future__ import annotations
 # ---- 双色基底：整套暗色主题只用这两个颜色做界面区分 ----
 INK = "#1e1e1e"      # 近黑：最底层（画布外底 / 面板底 / 工具栏底）
 ASH = "#2a2e34"      # 偏黑灰：抬起一层（输入框 / 按钮 / 选中 / 边框 / 悬停）
+WIN11_BLUE = "#0078d4"  # Windows 11 默认强调蓝：功能圆球（滑杆拖动球 / 单选选中球）
+
+# 面板边界：所有 QDockWidget 统一 1 像素 ASH 描边（两色里较浅的暗色）。
+# 放在主题常量里，新增面板不需要自己写样式；个别面板要单独覆盖 QDockWidget
+# 规则时，必须沿用这组常量，不能再把边框改掉。
+PANEL_BORDER_PX = 1
+PANEL_BORDER_COLOR = ASH
+PANEL_BORDER_QSS = f"border: {PANEL_BORDER_PX}px solid {PANEL_BORDER_COLOR};"
 
 # ---- 文字（不参与双色收敛，单独保证可读） ----
 TEXT = "#d8d8d8"      # 主文字
@@ -96,7 +108,7 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{ background: {ASH}; }}
 
-QDockWidget {{ background: {INK}; }}
+QDockWidget {{ background: {INK}; {PANEL_BORDER_QSS} }}
 QDockWidget::title {{ background: {ASH}; color: {TEXT}; padding: 3px; }}
 """
 
@@ -111,7 +123,8 @@ def apply_app_theme(app) -> None:
 
 
 __all__ = [
-    "INK", "ASH",
+    "INK", "ASH", "WIN11_BLUE",
+    "PANEL_BORDER_PX", "PANEL_BORDER_COLOR", "PANEL_BORDER_QSS",
     "TEXT", "TEXT_DIM", "TEXT_ON_ACCENT",
     "qc", "APP_QSS", "apply_app_theme",
 ]

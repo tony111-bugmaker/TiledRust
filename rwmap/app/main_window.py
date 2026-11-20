@@ -7,7 +7,8 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QAction, QCursor, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QInputDialog, QLabel,
+    QAbstractScrollArea, QApplication, QComboBox, QDialog, QFileDialog,
+    QInputDialog, QLabel,
     QHBoxLayout, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
     QStackedWidget, QTabBar, QToolBar, QVBoxLayout, QWidget,
 )
@@ -26,14 +27,10 @@ from ..document.tileset_document import TilesetDocument
 from ..io.template_reader import read_template_object
 from ..rw.automapping import AutoMapper, normalize_marker_gid
 from ..rw.exporter import export_map
-from ..rw.random_event import (
-    build_random_event_objects, find_or_create_triggers_layer, unique_prefix,
-)
 from ..rw.rwmod_pack import pack_rwmod
 from ..rw.selection import rect_to_cells as cells_from_rect
 from ..rw.thumbnail import make_thumbnail
 from ..rw.resize import shift_cells, shift_objects
-from ..rw.version import list_profiles
 from ..theme import ASH, INK, TEXT, apply_app_theme
 from ..tools.pen_tool import Anchor, PenPath
 from ..tools.picker_tool import pick_gid
@@ -46,12 +43,11 @@ from ..view import MapScene, MapView
 from ..widgets import (
     LayersDock, ObjectToolBar, PanelSettingsDialog, ProbeWindow,
     PropertiesDock, TilesetPropsDock, TilesetTilePropsDock, TilesetsDock,
-    TriggerGraphDock,
+    TriggerGraphDock, install_dock_tab_detach,
 )
 from ..widgets.minimap import MiniMapDock
 from ..widgets.new_tileset_dialog import NewTilesetDialog
 from ..widgets.object_toolbar import canonical_tool_id, make_select_cursor
-from ..widgets.random_event_dialog import RandomEventDialog
 from ..widgets.resize_map_dialog import ResizeMapDialog
 from ..widgets.tileset_editor import TilesetEditorWidget
 
@@ -64,16 +60,13 @@ _RESIZE_CURSORS = {
     "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor,
 }
 
-# 「文件 / 编辑 / 视图 / 地图 / 设置」5 个菜单里已有的功能，不再重复占用主工具栏。
-# 置 False 可一次性恢复旧版整排文字按钮。
-_HIDE_MENU_DUPLICATES = True
-
 # 顶部文档标签栏样式（双色暗色主题，对齐图块集标签）。
 # 界面区分色只用 INK（近黑）+ ASH（偏黑灰）两色，文字用可读浅色。
+# 2026-11-19 起：选中标签用深色 INK，未选中用浅色 ASH（与之前相反）。
 _DOC_TAB_STYLE = f"""
 QTabBar {{ background: {ASH}; border-bottom: 1px solid {INK}; }}
 QTabBar::tab {{
-    background: {INK};
+    background: {ASH};
     border: 1px solid {INK};
     border-bottom: none;
     padding: 3px 12px 4px 12px;
@@ -81,7 +74,7 @@ QTabBar::tab {{
     color: {TEXT};
     font-size: 11px;
 }}
-QTabBar::tab:selected {{ background: {ASH}; color: {TEXT}; }}
+QTabBar::tab:selected {{ background: {INK}; color: {TEXT}; }}
 QTabBar::tab:hover:!selected {{ background: rgba(36, 36, 36, 160); }}
 QTabBar::close-button {{ subcontrol-position: right; }}
 QTabBar::scroller {{ width: 16px; }}
@@ -113,6 +106,8 @@ class MainWindow(QMainWindow):
         self._automap_while_drawing = False
         self._automap_macro = False
         self._automap_total = 0
+        # 开启自动映射时临时显示 set 层；关闭时恢复原来的显隐与透明度。
+        self._automap_set_saved = None   # (id(doc), visible, opacity, current_layer)
         self._hover_cell = (-1, -1)
         # 右键拖动抓取虚影缓存：(region, id(layer), cells_2d)。
         self._capture_cache = None
@@ -157,6 +152,9 @@ class MainWindow(QMainWindow):
         self.scene = MapScene(self)
         self.view = MapView(self.scene, self)
         self.view.setContextMenuPolicy(Qt.NoContextMenu)  # 右键交给抓取/拾取，不弹系统菜单
+        # 鼠标事件实际落在 viewport 子控件上：只关 view 的菜单，viewport 仍是
+        # DefaultContextMenu，右键拖动结束会弹一个空白小菜单（一闪而过）。
+        self.view.viewport().setContextMenuPolicy(Qt.NoContextMenu)
 
         # ---- 多文档标签栏（Tiled 风格：顶部标签 + 右侧「+」开新地图） ----
         self.doc_tabs = QTabBar()
@@ -173,9 +171,9 @@ class MainWindow(QMainWindow):
         self._tab_plus.setToolTip("打开地图（新标签）")
         self._tab_plus.clicked.connect(self._open_dialog)
 
-        # 文档标签栏做成独立、不可拖动 / 浮动的工具栏行，固定在菜单栏正下方、
-        # 版本工具栏（1.15）上方；这样它既不会在切图集标签时随页面一起隐藏，
-        # 位置也锁死（不可移动、不可浮动、只能待在顶部）。
+        # 文档标签栏做成独立、不可拖动 / 浮动的工具栏行，固定在菜单栏正下方；
+        # 这样它既不会在切图集标签时随页面一起隐藏，位置也锁死（不可移动、
+        # 不可浮动、只能待在顶部）。
         self.tab_toolbar = QToolBar("文档标签栏")
         self.tab_toolbar.setObjectName("DocTabBar")
         self.tab_toolbar.setMovable(False)
@@ -190,8 +188,6 @@ class MainWindow(QMainWindow):
         self.tab_toolbar.addWidget(self.doc_tabs)
         self.tab_toolbar.addWidget(self._tab_plus)
         self.addToolBar(Qt.TopToolBarArea, self.tab_toolbar)
-        # 让版本工具栏另起一行，居于标签栏下方（实现「文件行下、1.15 上」）。
-        self.addToolBarBreak(Qt.TopToolBarArea)
 
         # 顶层中央容器 = 页面堆栈（标签栏已移到菜单栏正下方，不再塞进中央）。
         root_central = QWidget()
@@ -248,14 +244,87 @@ class MainWindow(QMainWindow):
         # 用 splitDockWidget 明确上下顺序，避免 Qt 把同侧面板折叠成标签页。
         ensure_panel_object_names(self)      # restoreState() 需要稳定 objectName
         apply_default_layout(self)
+        # 面板重合后允许把标签拖出来：浮出面板左上角对齐鼠标；不限制重合数量。
+        install_dock_tab_detach(self)
         QTimer.singleShot(0, self._apply_default_layout)
 
         self._build_actions()
         self._build_toolbar()
         self._build_status()
         self._connect_signals()
+        # 统一收口「空白右键菜单」：所有滚动类控件的 viewport 默认策略是
+        # DefaultContextMenu，右键拖动结束会弹一个空白小菜单（一闪而过）。
+        # 这里在装配完成后一次性关掉，新增面板/视图无需各自记得处理。
+        self._suppress_empty_context_menus()
         if auto_open:
             QTimer.singleShot(120, self._open_sample)
+
+        # 顶层窗口自身也必须关掉默认右键菜单：右键释放时 Qt 派发的
+        # QContextMenuEvent 会沿 viewport→view→…→顶层一路冒泡，即便各层视图
+        # 都是 NoContextMenu，只要顶层还是 DefaultContextMenu，Qt 就会在最外层
+        # 弹一个空的原生菜单（用户看到的「一闪而过的空框」，位置固定、与鼠标无关）。
+        self.setContextMenuPolicy(Qt.NoContextMenu)
+
+    def _suppress_empty_context_menus(self):
+        """关掉所有「没有真实右键菜单」的 viewport 的原生空菜单。
+
+        背景：鼠标事件实际落在 QAbstractScrollArea 的 viewport 子控件上；
+        即使 view 自己设了 NoContextMenu，viewport 仍是 DefaultContextMenu，
+        右键释放时 Qt 会派发一个没有任何内容的空菜单（用户看到的「小窗口」）。
+
+        规则：
+          * 控件自身 policy 已是 No / Custom / Actions → 有明确语义，不动；
+          * 控件（或其承载的 widget）重写了 contextMenuEvent → 有真实菜单，不动；
+          * 有 QAction 的控件（ActionsContextMenu 语义）→ 不动；
+          * 其余 DefaultContextMenu 的 viewport → 设为 NoContextMenu。
+
+        !! 以后新增视图 / 滚动控件请沿用本约定：要弹菜单就显式设 Custom 或
+        重写 contextMenuEvent；不需要菜单就让它走这里自动收口，不要留默认的
+        DefaultContextMenu。
+        """
+        from PySide6.QtWidgets import QAbstractItemView  # 局部导入，避免顶部依赖膨胀
+
+        def has_real_menu(widget) -> bool:
+            pol = widget.contextMenuPolicy()
+            if pol in (Qt.NoContextMenu, Qt.CustomContextMenu,
+                       Qt.ActionsContextMenu):
+                return True
+            # 重写了 contextMenuEvent 说明有自定义菜单逻辑（如图集面板的
+            # TilePalette「设置图集」）；QWidget 基类的实现不算。
+            try:
+                if type(widget).contextMenuEvent is not QWidget.contextMenuEvent:
+                    # QGraphicsView / QAbstractScrollArea 自身也重写了基类
+                    # contextMenuEvent 做事件转发，但它们未必有真实菜单；
+                    # 这类由下面的 viewport 分支单独判断。
+                    base = getattr(widget, "viewport", None)
+                    if base is None:  # 普通 QWidget：重写即视为真实菜单
+                        return True
+            except Exception:            # noqa: BLE001
+                pass
+            if isinstance(widget, QAbstractItemView) and widget.actions():
+                return True
+            return False
+
+        seen = set()
+        for area in self.findChildren(QAbstractScrollArea):
+            vp = area.viewport()
+            if vp is None or id(vp) in seen:
+                continue
+            seen.add(id(vp))
+            # 宿主有真实右键菜单 → 必须保留其 viewport 的事件派发
+            if has_real_menu(area):
+                continue
+            # 承载的 widget 重写了 contextMenuEvent（如 QScrollArea 内的
+            # TilePalette）→ 也保留
+            content = area.widget() if hasattr(area, "widget") else None
+            if content is not None:
+                try:
+                    if (type(content).contextMenuEvent is not
+                            QWidget.contextMenuEvent):
+                        continue
+                except Exception:        # noqa: BLE001
+                    pass
+            vp.setContextMenuPolicy(Qt.NoContextMenu)
 
     # ---------------- 装配 ----------------
     def _build_actions(self):
@@ -436,12 +505,6 @@ class MainWindow(QMainWindow):
             "以独立窗口打开 Triggers 对象层的只读节点图（矩形 / 点 / 线等全部对象）")
         self.act_trigger_graph.triggered.connect(self._toggle_trigger_graph)
 
-        # 等概率随机事件模板：一次性插入若干原生触发器对象（可一条撤销还原）
-        self.act_random_event = QAction("插入随机事件…", self)
-        self.act_random_event.setToolTip(
-            "等概率抽签 + 指定矩形内检测单位 + 删除单位；写入 Triggers 层，Ctrl+Z 可撤销")
-        self.act_random_event.triggered.connect(self._insert_random_event)
-
         file_menu = self.menuBar().addMenu("文件")
         for action in (self.act_open, self.act_sample, self.act_new_tileset,
                        self.act_save, self.act_save_as,
@@ -479,8 +542,6 @@ class MainWindow(QMainWindow):
         map_menu.addAction(self.act_autocrop)
         # 翻转 / 旋转 4 项按用户要求移到对象工具栏最右端，地图菜单不再重复。
         map_menu.addSeparator()
-        map_menu.addAction(self.act_random_event)
-        map_menu.addSeparator()
         map_menu.addAction(self.act_load_rules)
         map_menu.addAction(self.act_automap_now)
         map_menu.addAction(self.act_automap_while)
@@ -500,26 +561,9 @@ class MainWindow(QMainWindow):
         settings_menu.addAction(self.act_trigger_graph)
 
     def _build_toolbar(self):
-        bar = QToolBar("主工具栏")
-        bar.setObjectName("MainToolBar")   # restoreState() 需要稳定 objectName
-        self.addToolBar(bar)
-        # 4 个菜单里已有的按钮全部隐藏（action 仍留在菜单和快捷键上），
-        # 只保留菜单里没有的版本下拉；常用开关挪到图标工具栏右侧。
-        if not _HIDE_MENU_DUPLICATES:
-            for action in (self.act_open, self.act_save, self.act_save_as,
-                           self.act_undo, self.act_redo, self.act_brush,
-                           self.act_eraser, self.act_grid, self.act_thumb,
-                           self.act_pack, self.act_probe, self.act_automap_while):
-                bar.addAction(action)
-            bar.addSeparator()
-        bar.addWidget(QLabel(" 版本 "))
-        self.version_combo = QComboBox()
-        self.version_combo.addItems(list_profiles())
-        self.version_combo.setCurrentText(self.state.profile.version_id)
-        self.version_combo.currentTextChanged.connect(self._on_version)
-        bar.addWidget(self.version_combo)
-
-        # Tiled 风格：主工具栏与插入对象图标栏排在同一行（版本下拉在最左）。
+        # 原「主工具栏」在移除版本下拉后没有任何按钮，只剩一行空白占位，已整体
+        # 删除。这里只保留对象工具栏，并让它独占标签栏下方一行。
+        self.addToolBarBreak(Qt.TopToolBarArea)
         self.object_toolbar = ObjectToolBar(self)
         self.addToolBar(Qt.TopToolBarArea, self.object_toolbar)
         # 变换 4 按钮排在对象工具栏「瓦片画笔」文字之前（图标左、文字右），
@@ -539,7 +583,7 @@ class MainWindow(QMainWindow):
             (self.act_rot_ccw, "rot_ccw"),
         ])
         # 「绘制时自动地图」按用户要求只在「地图」菜单显示，不再放工具栏。
-        # 两条工具栏此刻才存在，补进「视图 → 视图和工具栏」的勾选列表。
+        # 对象工具栏此刻才存在，补进「视图 → 视图和工具栏」的勾选列表。
         self._append_toolbar_toggles()
 
     def _apply_default_layout(self):
@@ -595,10 +639,9 @@ class MainWindow(QMainWindow):
     def _append_toolbar_toggles(self):
         """工具栏在 _build_toolbar() 之后才存在，这里补进「视图和工具栏」。"""
         menu = self._views_toolbars_menu
-        # 用 objectName 匹配（标题是「主工具栏」/「对象工具」，不统一）；
+        # 按 objectName 匹配（对象工具栏的标题是「对象工具」）；
         # 文档标签栏不列：它按用户要求锁定在顶部，不该提供隐藏入口。
-        for name, label in (("MainToolBar", "主工具栏"),
-                            ("ObjectToolBar", "对象工具栏")):
+        for name, label in (("ObjectToolBar", "对象工具栏"),):
             bar = self.findChild(QToolBar, name)
             if bar is None:
                 continue
@@ -830,8 +873,33 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"示例地图不存在: {sample}")
 
+    def _open_dialog_start_dir(self) -> str:
+        """选一个真正能看到 .tmx 的目录作为「打开」对话框起点。
+
+        1.14 的 ``mods/maps`` 只有 rules / terrain 等子目录，直接拿它当起点
+        会让文件列表一片空白（其实地图都在 ``assets/maps/skirmish``）；
+        1.15 的 ``mods/maps`` 本身就有很多 .tmx。这里优先用第一个「直接包含
+        .tmx」的目录，两个都没有时仍回到 ``mods/maps``，不影响手动输入路径。
+        """
+        profile = self.state.profile
+        candidates = [as_path(profile.mods_maps),
+                      as_path(profile.sample_map).parent]
+        seen: set[Path] = set()
+        for base in candidates:
+            if base in seen:
+                continue
+            seen.add(base)
+            try:
+                if base.is_dir() and any(
+                        p.is_file() and p.suffix.lower() == ".tmx"
+                        for p in base.iterdir()):
+                    return str(base)
+            except OSError:
+                continue
+        return str(candidates[0]) if candidates else ""
+
     def _open_dialog(self):
-        start = str(self.state.profile.mods_maps)
+        start = self._open_dialog_start_dir()
         path, _ = QFileDialog.getOpenFileName(self, "打开 Tiled 地图", start, "TMX 地图 (*.tmx)")
         if path:
             self._open(as_path(path))
@@ -845,9 +913,11 @@ class MainWindow(QMainWindow):
             return
         self._own_file = False
         self._attach_context(ctx)
+        legacy_note = "（1.14 地图，已自动按 1.15 规则读取）" \
+            if "1.14" in str(path) else ""
         self.statusBar().showMessage(
             f"已打开 {path.name}  {ctx.doc.width}x{ctx.doc.height}  "
-            f"{len(ctx.doc.layers)} 层 / {len(ctx.doc.tilesets)} 图块集"
+            f"{len(ctx.doc.layers)} 层 / {len(ctx.doc.tilesets)} 图块集{legacy_note}"
         )
 
     # ---------------- 多文档标签 ----------------
@@ -904,6 +974,7 @@ class MainWindow(QMainWindow):
         self._save_view_transform()              # 保存旧文档视图变换
         self._active_index = self._contexts.index(ctx)
         self.state = ctx
+        self._active_layer = None          # 旧文档的层不能带到新文档（按钮启用态据此同步）
         self._rebuild_tabs()
         self._refresh_document()                 # 重建场景 / 视图 / 面板 + fit
         self._restore_view_transform()            # 恢复该文档的缩放 / 平移
@@ -984,7 +1055,10 @@ class MainWindow(QMainWindow):
         self.trigger_graph_dock.set_document(
             doc, self.state.undo_stack, self._refresh_objects)
         self.object_toolbar.set_document(doc)
-        self._refresh_transform_actions()   # 切文档后目标可能已消失，按钮回暗
+        # 切文档后当前层回到瓦片层：整排对象工具连同变换 4 键一起回暗。
+        self.object_toolbar.set_object_layer_active(
+            isinstance(self._active_layer, ObjectLayer))
+        self._refresh_transform_actions()
         # 迷你地图：绑定当前视图，并跟随激活文档的编辑（防抖重渲染）。
         self.minimap_dock.minimap.set_view(self.view)
         self.minimap_dock.minimap.set_document(doc)
@@ -1237,16 +1311,6 @@ class MainWindow(QMainWindow):
                             title=self.state.doc.path.stem)
         self.statusBar().showMessage(f"已打包 {result.get('path', '')}")
 
-    def _on_version(self, version_id: str):
-        try:
-            self.state.set_profile(version_id)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "切换版本失败", str(exc))
-            return
-        if self.state.doc is not None:
-            self._refresh_document()
-        self.statusBar().showMessage(f"已切换到 {self.state.profile.display_name}")
-
     # ---------------- 编辑 ----------------
     def _set_tool(self, tool_id: str):
         # B / E 与图标工具栏的「瓦片画笔 / 橡皮」共用同一条切换路径，
@@ -1254,6 +1318,9 @@ class MainWindow(QMainWindow):
         self._set_object_tool("eraser" if tool_id == "eraser" else "brush")
 
     def _on_gid(self, gid: int):
+        # 从图块集点瓦片就是要用画笔/图章落笔：若之前停在钢笔、矩形等对象工具，
+        # 这里自动切回画笔，否则 MapView 不会发出 cellPressed，看起来像"印章画不了"。
+        self._set_tool("brush")
         self.state.brush_gid = int(gid)
         self.statusBar().showMessage(f"笔刷 gid={gid}")
 
@@ -1329,6 +1396,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"右键拾取 @({col},{row}) → gid={gid}")
 
     def _on_stamp(self, gids):
+        if gids:
+            self._set_tool("brush")   # 选了矩形印章就直接进入可盖章状态
         self.state.stamp = gids
         self._refresh_transform_actions()
         if gids:
@@ -1411,6 +1480,9 @@ class MainWindow(QMainWindow):
         # 以及画布上的对象选中态——否则上一张图的框会残留在新层上。
         self._clear_tile_selection()
         self.scene.set_selected_objects([])
+        # 用户要求：没选对象层时，对象工具整排 + 变换 4 键全部置灰。
+        self.object_toolbar.set_object_layer_active(isinstance(layer, ObjectLayer))
+        self._refresh_transform_actions()
         if layer is not None:
             self.statusBar().showMessage(
                 f"当前层 {layer.name}{'（只读）' if layer.readonly else ''}  {layer.note}"
@@ -1528,10 +1600,27 @@ class MainWindow(QMainWindow):
             return None
         return target
 
-    def _automap_marker(self, raw):
-        """把写入 set 层的瓦片归一到所属基础图集首格；无法归一时原样保留。"""
+    def _normalize_marker(self, raw):
+        """归一化到 set 层标记，带上从规则派生的规范标记映射（Stone/Lava）。
+
+        规则的规范标记属于规则图 gid 空间；当工作图图集 firstgid 不同时
+        （如 Large Lava Divide），交给 AutoMapper 按「图集名 + 相对索引」
+        换算到工作图空间，避免 Lava+4 被误当成 Stone 标记。
+        """
         doc = self.state.doc
-        gid = normalize_marker_gid(doc, raw) if doc is not None else -1
+        if doc is None:
+            return -1
+        normalize = getattr(self._automapper, "normalize_marker", None) \
+            if self._automapper is not None else None
+        if normalize is not None:
+            return normalize(doc, raw)
+        canonical = getattr(self._automapper, "canonical_marker_gids", None) \
+            if self._automapper is not None else None
+        return normalize_marker_gid(doc, raw, canonical)
+
+    def _automap_marker(self, raw):
+        """把写入 set 层的瓦片归一到规则认可的标记 gid；无法归一时原样保留。"""
+        gid = self._normalize_marker(raw)
         return (int(raw) & 0xFFFFFFFF) if gid < 0 else (gid & 0xFFFFFFFF)
 
     @staticmethod
@@ -2242,7 +2331,7 @@ class MainWindow(QMainWindow):
         fwd, fwd_dist = {}, {}
         last, last_i = None, None
         for key in keys:                       # 起点 → 终点
-            gid = normalize_marker_gid(doc, final[key])
+            gid = self._normalize_marker(final[key])
             if gid >= 0:
                 last, last_i = gid & 0xFFFFFFFF, order[key]
             elif last is not None:
@@ -2252,7 +2341,7 @@ class MainWindow(QMainWindow):
         rev, rev_dist = {}, {}
         nxt, nxt_i = None, None
         for key in reversed(keys):             # 终点 → 起点
-            gid = normalize_marker_gid(doc, final[key])
+            gid = self._normalize_marker(final[key])
             if gid >= 0:
                 nxt, nxt_i = gid & 0xFFFFFFFF, order[key]
             elif nxt is not None:
@@ -2261,7 +2350,7 @@ class MainWindow(QMainWindow):
 
         repaired, filled, skipped = {}, 0, 0
         for key, raw in final.items():
-            gid = normalize_marker_gid(doc, raw)
+            gid = self._normalize_marker(raw)
             if gid >= 0:
                 repaired[key] = gid & 0xFFFFFFFF
             elif key in fwd and (key not in rev
@@ -2884,6 +2973,12 @@ class MainWindow(QMainWindow):
 
     # ---------------- 内容变换（翻转 / 旋转）：图章内容 / 插入图片 ----------------
     def _can_transform(self) -> bool:
+        """变换键只看文档可写 + 有无目标，不受「当前层是否对象层」限制。
+
+        图章是右键从**瓦片层**抓取的，抓取时当前层必然是瓦片层；若把变换键
+        也绑到对象层，抓完图章 4 键就会熄灭（2026-11-17 用户反馈）。
+        按层置灰的只是对象工具整排，不含这 4 个键。
+        """
         return (self.state.doc is not None
                 and self.state.profile.write_enabled)
 
@@ -2904,7 +2999,11 @@ class MainWindow(QMainWindow):
         return None
 
     def _refresh_transform_actions(self):
-        """有变换目标才点亮 4 个按钮；否则禁用（暗色、点击无反应）。"""
+        """有变换目标才点亮 4 个按钮；否则禁用（暗色、点击无反应）。
+
+        目标来自「选中的图片」或「右键框选的图章」，不依赖当前层——图章本身
+        就是从瓦片层抓的。对象工具整排的按层置灰在 _on_layer_selected 里管。
+        """
         enabled = self._can_transform() and self._transform_target() is not None
         for action in self.object_toolbar._transform_actions:
             action.setEnabled(enabled)
@@ -3110,56 +3209,6 @@ class MainWindow(QMainWindow):
         self._attach_context(ctx)
         self.statusBar().showMessage(
             f"已新建空白地图 {w}×{h}，包含 {len(tsx_paths)} 个图集（瓦片 {doc.tile_w}×{doc.tile_h}）")
-
-    def _insert_random_event(self):
-        """按对话框参数往 Triggers 层插入一条等概率随机事件链。
-
-        全部是铁锈原生 type（unitAdd / unitDetect / unitRemove），不造游戏
-        不认识的新类型；整批对象走一个 ObjectCommand，Ctrl+Z 一次还原。
-        """
-        doc = self.state.doc
-        if doc is None:
-            QMessageBox.information(self, "插入随机事件", "请先打开或新建一张地图")
-            return
-        dlg = RandomEventDialog(self, doc=doc)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        spec = dlg.spec()
-        spec.id_prefix = unique_prefix(doc, spec.id_prefix)
-
-        had_triggers = any(
-            isinstance(l, ObjectLayer) and (l.name or "").lower() == "triggers"
-            for l in doc.layers)
-        layers_before = list(doc.layers)
-        layer = find_or_create_triggers_layer(doc)
-        layers_after = list(doc.layers)
-        objs = build_random_event_objects(spec, self._new_object_id())
-
-        before = snapshot(layer)
-        layer.objects.extend(objs)
-        after = snapshot(layer)
-        layer.dirty = True
-        doc.dirty = True
-        if not had_triggers:
-            # 新层要补进层面板 / 对象工具栏，节点图的层下拉由 refresh 自己更新
-            self.layers_dock.set_document(doc)
-            self.object_toolbar.set_document(doc)
-
-        stack = self.state.undo_stack
-        if not had_triggers:
-            # 顺手新建的 Triggers 层也要能撤销，否则撤销后留下一个空层。
-            from ..commands.layer_command import LayerStructureCommand
-            stack.beginMacro("插入随机事件")
-            stack.push(LayerStructureCommand(
-                doc, layers_before, layers_after, "新建 Triggers 层",
-                self._refresh_document))
-        stack.push(ObjectCommand(
-            doc, layer, before, after, "插入随机事件", self._refresh_objects))
-        if not had_triggers:
-            stack.endMacro()
-        self.statusBar().showMessage(
-            f"已插入随机事件「{spec.name}」：{len(objs)} 个触发器 → 层 {layer.name}"
-            f"（每个分支 {100.0 / spec.validated().branch_count:g}%，Ctrl+Z 可撤销）")
 
     def _finish_poly(self):
         # Ctrl+Return 已被本 QAction 占用；钢笔模式下复用它作备用完成入口，
@@ -4148,9 +4197,33 @@ class MainWindow(QMainWindow):
                 f"已加载规则文件 {path}  规则 {len(self._automapper.rules)} 条"
             )
 
+    def _restore_automap_set_layer(self):
+        """关闭绘制时自动地图时，把 set 层的显示状态恢复成开启前的样子。"""
+        saved = self._automap_set_saved
+        self._automap_set_saved = None
+        if not saved:
+            return
+        doc_id, visible, opacity, previous_layer = saved
+        doc = self.state.doc
+        if doc is None or id(doc) != doc_id:
+            return
+        set_layer = doc.layer_by_name("set")
+        if set_layer is not None:
+            set_layer.visible = bool(visible)
+            set_layer.opacity = opacity
+            self.scene.set_layer_visible(set_layer, bool(visible))
+            self.scene.set_layer_opacity(set_layer, opacity)
+        self.layers_dock.set_document(doc)
+        if previous_layer in doc.layers:
+            self.state.current_layer = previous_layer
+            self.scene.current_layer = previous_layer
+            self.scene.view_current_layer = previous_layer
+            self.layers_dock.select_layer(previous_layer)
+
     def _toggle_automap(self, checked: bool):
         self._automap_while_drawing = bool(checked)
         if not checked:
+            self._restore_automap_set_layer()
             self.statusBar().showMessage("绘制时自动地图：关")
             return
         if self._automapper is None and not self._load_automap_rules():
@@ -4162,6 +4235,12 @@ class MainWindow(QMainWindow):
         doc = self.state.doc
         set_layer = doc.layer_by_name("set") if doc is not None else None
         if set_layer is not None:
+            if (self._automap_set_saved is None
+                    or self._automap_set_saved[0] != id(doc)):
+                self._automap_set_saved = (
+                    id(doc), set_layer.visible, set_layer.opacity,
+                    self.state.current_layer,
+                )
             # 只改内存显示状态，保真写回不动 XML 的 visible/opacity。
             set_layer.visible = True
             set_layer.opacity = min(set_layer.opacity or 1.0, 0.35)

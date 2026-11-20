@@ -205,7 +205,7 @@
 ### 6.1 软件已覆盖的核心闭环（用于对照「哪些已经做了」）
 - 建图：新建地图 / 新建图集 / 打开 / 保存 / 另存为
 - 地形与自动映射：`act_automap_now`、`act_automap_while`、`act_load_rules`、`config/layer_rules.json`
-- 单位与触发器：画笔/橡皮/删除对象、触发器节点图、等概率随机事件模板
+- 单位与触发器：画笔/橡皮/删除对象、触发器节点图
 - 图集与瓦片属性：独立图集设置面板、瓦片属性面板、图层规则（Ground/Items/Units/Triggers/set…）
 - 缩略图：`make_thumbnail()` → `*_map.png`
 - 导出与打包：`export_map()` → `mods/maps`；`pack_rwmod()` → `.rwmod`

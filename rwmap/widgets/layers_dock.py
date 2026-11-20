@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from .dock_chrome import install_title_bar
 from .tiled_icons import tiled_icon, tiled_pixmap
-from ..theme import ASH, INK, TEXT, TEXT_DIM
+from ..theme import ASH, INK, TEXT, TEXT_DIM, WIN11_BLUE
 
 # 界面区分色收敛为双色：INK（近黑底层）+ ASH（偏黑灰抬起层）。
 _BG = QColor(INK)
@@ -36,6 +36,7 @@ _EYE_W = 18
 _LOCK_W = 18
 _RIGHT_PAD = 6
 
+# 透明度拖动球用 Win11 蓝：属于"当前操作点"功能色，不参与双色底色收敛。
 _PANEL_STYLE = f"""
 QWidget#LayerPanelHolder {{ background: {INK}; }}
 QListWidget {{ background: {INK}; border: none; color: {TEXT}; }}
@@ -47,7 +48,7 @@ QToolButton:disabled {{ background: transparent; }}
 QLabel {{ color: {TEXT}; }}
 QSlider::groove:horizontal {{ height: 4px; background: {ASH}; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: {ASH}; border-radius: 2px; }}
-QSlider::handle:horizontal {{ background: {ASH}; width: 10px;
+QSlider::handle:horizontal {{ background: {WIN11_BLUE}; width: 10px;
                             margin: -4px 0; border-radius: 5px; }}
 """
 

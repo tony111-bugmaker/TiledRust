@@ -30,7 +30,7 @@ _MISSING = QColor(ASH)
 _TAB_STYLE = f"""
 QTabBar {{ background: {ASH}; border-bottom: 1px solid {INK}; }}
 QTabBar::tab {{
-    background: {INK};
+    background: {ASH};
     border: 1px solid {INK};
     border-bottom: none;
     padding: 3px 10px 4px 10px;
@@ -38,7 +38,7 @@ QTabBar::tab {{
     color: {TEXT};
     font-size: 11px;
 }}
-QTabBar::tab:selected {{ background: {ASH}; color: {TEXT}; }}
+QTabBar::tab:selected {{ background: {INK}; color: {TEXT}; }}
 QTabBar::tab:hover:!selected {{ background: rgba(36, 36, 36, 160); }}
 QTabBar::scroller {{ width: 18px; }}
 """

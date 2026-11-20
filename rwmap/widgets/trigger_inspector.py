@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from rwmap.document.map_object import object_uid
-from rwmap.document.properties import EDITOR_GROUP_PROPERTY
+from rwmap.document.properties import HIDDEN_EDITOR_PROPERTIES
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
@@ -359,8 +359,12 @@ def _clear_layout(layout):
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
-            widget.setParent(None)
+            # 必须先 hide 再摘父级：对一个「当前可见」的控件调用 setParent(None)
+            # 会让它瞬间变成顶层窗口，Windows 立刻给它配一套带最小化/最大化/
+            # 关闭的系统标题栏（无标题 → 没有任何文字），一闪而过。
+            # 先隐藏，摘下来时就是不可见的顶层窗，不会再闪。
             widget.hide()
+            widget.setParent(None)
             widget.deleteLater()
             continue
         sub = item.layout()
@@ -574,7 +578,7 @@ class TriggerInspector(QWidget):
         count = 0
         for key in ordered:
             if (key in seen or key == "id" or key in LINK_PROPS
-                    or key == EDITOR_GROUP_PROPERTY or key not in props):
+                    or key in HIDDEN_EDITOR_PROPERTIES or key not in props):
                 continue
             seen.add(key)
             # 已有「随机生成单位」时，spawnUnits 完全由它派生，不再单独显示。
@@ -657,8 +661,11 @@ class TriggerInspector(QWidget):
         vhint.setContentsMargins(87, 0, 0, 3)
         vhint.setWordWrap(True)
         vhint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        vhint.setVisible(bool(vhint.text()))
         self.vbox.addWidget(vhint)
+        # 必须先 addWidget 再 setVisible：无 parent 的控件调用 setVisible(True)
+        # 会被 Qt 当成顶层窗口显示（带系统三键、标题回退成 applicationName），
+        # 随后 addWidget 才挂回父级 → 一闪而过的空窗。属性多时批量出现。
+        vhint.setVisible(bool(vhint.text()))
         # 输入时实时更新中文释义
         edit.textEdited.connect(
             lambda text, k=key, l=vhint: (
@@ -729,8 +736,9 @@ class TriggerInspector(QWidget):
         # 不换行的话这句长文案会把整个面板的最小宽度撑开，导致右边被裁掉
         vhint.setWordWrap(True)
         vhint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        vhint.setVisible(bool(vhint.text()))
         self.vbox.addWidget(vhint)
+        # 同上：先挂进布局再显示，避免无 parent 时闪出顶层空窗。
+        vhint.setVisible(bool(vhint.text()))
 
         def _refresh_hint():
             text = self._weight_hint(edit.text())
@@ -771,7 +779,7 @@ class TriggerInspector(QWidget):
             candidates = [k for k in keys
                           if k not in used and k != "id"
                           and k not in LINK_PROPS
-                          and k != EDITOR_GROUP_PROPERTY]
+                          and k not in HIDDEN_EDITOR_PROPERTIES]
             if not candidates:
                 continue
             self.prop_select.addItem(f"── {title} ──", "")
@@ -901,7 +909,7 @@ class TriggerInspector(QWidget):
         if not new_type or new_type == old_type:
             return
         before_props = dict(self.obj.properties.values)
-        keep = {"id", EDITOR_GROUP_PROPERTY, *type_props(new_type)}
+        keep = {"id", *HIDDEN_EDITOR_PROPERTIES, *type_props(new_type)}
         removed = [k for k in before_props if k not in keep]
         filled = [k for k in removed if before_props[k] != ""]
         raw_uid = object_uid(self.obj)

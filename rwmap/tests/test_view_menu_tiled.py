@@ -5,7 +5,7 @@
    绝不写回 layer.visible / layer.opacity（那会污染 TMX、进撤销栈）。
 2. 切换文档 / 切换图层 / 图层面板刷新之后，开关状态必须仍然生效。
 3. 缩放动作在图集标签页要作用到图集画布，不能是「点了没反应」。
-4. 菜单仍是「文件 / 编辑 / 视图 / 地图 / 设置」5 个，主工具栏不新增重复项。
+4. 菜单仍是「文件 / 编辑 / 视图 / 地图 / 设置」5 个，不残留空的主工具栏。
 """
 from __future__ import annotations
 
@@ -96,20 +96,17 @@ class TestMenuStructure(ViewMenuTestBase):
         dup = {k: v for k, v in keys.items() if len(v) > 1}
         self.assertEqual(dup, {}, f"快捷键冲突: {dup}")
 
-    def test_main_toolbar_still_hides_menu_duplicates(self):
-        main = next(b for b in self.w.findChildren(QToolBar)
-                    if b.windowTitle() == "主工具栏")
-        texts = [a.text() for a in main.actions()]
-        for duplicated in ("打开 .tmx", "保存", "画笔 (B)", "橡皮 (E)",
-                           "网格", "生成缩略图", "绘制时自动地图"):
-            self.assertNotIn(duplicated, texts)
+    def test_empty_main_toolbar_removed(self):
+        self.assertFalse(
+            any(b.windowTitle() == "主工具栏" for b in self.w.findChildren(QToolBar)),
+            "版本下拉移除后留下的空主工具栏不应还在界面上")
 
     def test_panels_menu_lists_every_dock(self):
         acts = [a for a in self.panels_menu.actions() if not a.isSeparator()]
         titles = [a.text() for a in acts]
         for spec in PANEL_SPECS:
             self.assertIn(spec.title, titles)
-        self.assertIn("主工具栏", titles)
+        self.assertNotIn("主工具栏", titles)
         self.assertIn("对象工具栏", titles)
         self.assertNotIn("文档标签栏", titles, "标签栏位置锁定，不该给隐藏入口")
 

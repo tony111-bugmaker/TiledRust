@@ -50,6 +50,51 @@ class PanelSettingsTest(unittest.TestCase):
         self.assertEqual(texts[3], self.w.act_trigger_graph.text())
         self.assertTrue(self.w.act_trigger_graph.isCheckable())
 
+    def test_version_switch_removed_and_always_1_15(self):
+        """1.14 模式已移除：界面无版本下拉，旧配置残留也不影响读取。"""
+        from rwmap.rw.version import active_profile, list_profiles
+
+        self.assertEqual(list_profiles(), ["1.15"])
+        self.assertFalse(hasattr(self.w, "version_combo"))
+        with patch("rwmap.rw.version.load_json",
+                   return_value={"profile": "1.14"}):
+            self.assertEqual(active_profile().version_id, "1.15")
+            self.assertTrue(active_profile().write_enabled)
+
+    def test_legacy_114_map_opens_with_1_15_profile(self):
+        """1.14 路径下的地图也按 1.15 规则读取，不再进入只读模式。"""
+        from rwmap.rw.version import load_profile
+
+        legacy = load_profile("1.14").sample_map
+        if not legacy.is_file():
+            self.skipTest("本机未安装 1.14 示例地图")
+        w = MainWindow(auto_open=False)
+        w._open(legacy)
+        self.assertEqual(w.state.profile.version_id, "1.15")
+        self.assertTrue(w.state.can_edit())
+        w.deleteLater()
+
+    def test_open_dialog_starts_where_tmx_files_are_visible(self):
+        """打开对话框起点要落在真有 .tmx 的目录，不能停在只有子目录的 mods/maps。"""
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mods = Path(tmp) / "mods_maps"
+            skirmish = Path(tmp) / "assets" / "skirmish"
+            mods.mkdir()
+            skirmish.mkdir(parents=True)
+            sample = skirmish / "demo.tmx"
+            sample.write_text("<map/>", encoding="utf-8")
+            fake = SimpleNamespace(mods_maps=mods, sample_map=sample)
+
+            with patch.object(self.w.state, "profile", fake):
+                self.assertEqual(Path(self.w._open_dialog_start_dir()), skirmish)
+
+            # 1.15 这类版本：mods/maps 本身就有 .tmx，应优先用它
+            (mods / "mod.tmx").write_text("<map/>", encoding="utf-8")
+            with patch.object(self.w.state, "profile", fake):
+                self.assertEqual(Path(self.w._open_dialog_start_dir()), mods)
+
     # ---- 面板清单 ----
     def test_specs_match_real_docks(self):
         docks = self.w.findChildren(QDockWidget)

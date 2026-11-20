@@ -16,6 +16,19 @@ EDITOR_GROUP_PROPERTY = "rwmap_group"
 # 该名字，绝不影响游戏运行。只在保存时写，拖动过程中不实时写。
 EDITOR_NODE_POS_PROPERTY = "rwmap_node_pos"
 
+# 旧版 / 手写 TMX 里也会用 ``rwmap_noc``（node coordinate）记录节点图位置。
+# 和分组一样属于编辑器私有属性：必须原样写进文件、下次打开仍能恢复布局，
+# 但绝不出现在右侧属性面板、添加属性下拉、节点摘要和搜索里。
+LEGACY_EDITOR_NODE_POS_PROPERTY = "rwmap_noc"
+
+# 统一隐藏列表：新增「只给编辑器自己看」的属性时，只需加到这里。
+# 所有界面过滤都读这个集合，避免某一处漏改又把私有属性显示出来。
+HIDDEN_EDITOR_PROPERTIES = frozenset({
+    EDITOR_GROUP_PROPERTY,
+    EDITOR_NODE_POS_PROPERTY,
+    LEGACY_EDITOR_NODE_POS_PROPERTY,
+})
+
 
 @dataclass
 class PropertyBag:

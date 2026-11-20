@@ -167,6 +167,56 @@ class AutoMappingEngineTest(unittest.TestCase):
         self.assertEqual(normalize_marker_gid(bare, 130), 130)
         self.assertEqual(normalize_marker_gid(bare, 813), 813)
 
+    # ---- 岩石/岩浆过渡失效：规范标记 gid 不是图集首格 ----
+    def test_canonical_markers_derived_from_rules(self):
+        """规则派生的规范标记里，Stone/Lava 不是首格（938->945 / 974->978）。"""
+        canon = self.mapper.canonical_marker_gids
+        self.assertEqual(canon.get(938), 945, "Stone 标记应为 945 而非首格 938")
+        self.assertEqual(canon.get(974), 978, "Lava 标记应为 978 而非首格 974")
+        # 其它图集标记 == 首格，派生结果不应改变它们
+        for first in (1, 36, 116, 126, 176, 186, 770):
+            self.assertEqual(canon.get(first), first)
+
+    def test_normalize_stone_and_lava_to_canonical(self):
+        """石头/岩浆图集不在工作地图里时，首格与规范格都要归一到规范标记。"""
+        from rwmap.rw.automapping import normalize_marker_gid
+        canon = self.mapper.canonical_marker_gids
+        f = lambda raw: normalize_marker_gid(self.doc, raw, canon)
+        self.assertEqual(f(938), 945)   # Stone 首格
+        self.assertEqual(f(945), 945)   # Stone 规范格
+        self.assertEqual(f(974), 978)   # Lava 首格
+        self.assertEqual(f(978), 978)   # Lava 规范格
+        self.assertEqual(f(130), 126)   # 普通图集回归：仍归一到首格
+
+    def test_stone_on_sand_generates_transitions(self):
+        """石头画到沙地必须生成 Stone-Sand 过渡瓦片（截图里的阶梯硬边回归）。
+
+        这曾因 Stone 被归一到首格 938 而完全失效：规则要求 945，匹配不上，
+        reset_base 只写回裸石头块，形成没有圆滑过渡的阶梯状边界。
+        """
+        import copy
+        from rwmap.rw.automapping import normalize_marker_gid, BASE_GIDS
+        canon = self.mapper.canonical_marker_gids
+        d = copy.deepcopy(self.doc)
+        sl, gl = d.layer_by_name("set"), d.layer_by_name("Ground")
+        c0, r0 = 60, 60
+        for y in range(r0 - 3, r0 + 4):
+            for x in range(c0 - 3, c0 + 4):
+                sl.cells[sl.index(x, y)] = 770       # 沙地底
+                gl.cells[gl.index(x, y)] = 0
+        marker = normalize_marker_gid(d, 938, canon)
+        self.assertEqual(marker, 945)
+        sl.cells[sl.index(c0, r0)] = marker
+        changes = self.mapper.compute(d, area=(c0, r0, c0, r0),
+                                      radius=2, only_diff=False)
+        transitions = [g for _x, _y, g in changes.get("Ground", [])
+                       if g not in BASE_GIDS]
+        self.assertGreater(len(transitions), 0,
+                           "石头画到沙地应生成过渡瓦片，不能只剩裸石头块")
+        # 这些 gid 来自 Stone-Sand - Flat 图集（1004-1024）
+        self.assertTrue(any(1004 <= g <= 1024 for g in transitions),
+                        f"应出现 Stone-Sand 过渡瓦片，实际 {transitions}")
+
 
 class AutoMappingUiTest(unittest.TestCase):
     @classmethod

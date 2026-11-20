@@ -171,14 +171,11 @@ class Round9UiTest(unittest.TestCase):
         self.assertGreater(_blue_pixels(make_select_cursor().pixmap()), 20)
 
     # ---- 4. 工具栏 ----
-    def test_main_toolbar_hides_menu_duplicates(self):
+    def test_empty_main_toolbar_removed(self):
         w = self.w
-        main = next(b for b in w.findChildren(QToolBar)
-                    if b.windowTitle() == "主工具栏")
-        texts = [a.text() for a in main.actions()]
-        for duplicated in ("打开 .tmx", "保存", "画笔 (B)", "橡皮 (E)",
-                           "网格", "生成缩略图", "绘制时自动地图"):
-            self.assertNotIn(duplicated, texts)
+        self.assertFalse(
+            any(b.windowTitle() == "主工具栏" for b in w.findChildren(QToolBar)),
+            "版本下拉移除后留下的空主工具栏不应还在界面上")
         file_menu = next(m for m in w.menuBar().actions()
                          if m.text() == "文件")
         self.assertIn("打开 .tmx",

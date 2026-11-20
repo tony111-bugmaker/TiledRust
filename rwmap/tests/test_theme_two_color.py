@@ -2,6 +2,7 @@
 
 用户需求：暗色模式只保留两个界面区分色 —— 近黑 ``#1e1e1e``（INK）与
 偏黑灰 ``#2a2e34``（ASH），其余全部靠这两个色的深浅/透明度表达。
+2026-11-18 面板边界线定为 1px ASH（两色里较浅的暗色），不新增第三种色。
 
 这里锁住三条不变量：
 
@@ -22,7 +23,8 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
 from rwmap.theme import (
-    APP_QSS, ASH, INK, TEXT, TEXT_DIM, apply_app_theme, qc,
+    APP_QSS, ASH, INK, PANEL_BORDER_COLOR, PANEL_BORDER_PX, TEXT, TEXT_DIM,
+    WIN11_BLUE, apply_app_theme, qc,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +59,10 @@ class ThemeConstantTest(unittest.TestCase):
         for value in (INK, ASH):
             c = QColor(value)
             self.assertLess(c.lightness(), 60, f"{value} 不是深色")
+        # 面板线色必须是两色里较浅的 ASH，宽度 1px，不引入第三色。
+        self.assertEqual(PANEL_BORDER_COLOR.lower(), ASH.lower())
+        self.assertEqual(PANEL_BORDER_PX, 1)
+        self.assertGreater(QColor(ASH).lightness(), QColor(INK).lightness())
 
     def test_text_is_readable(self):
         """文字必须与背景有足够对比度。"""
@@ -133,6 +139,9 @@ class PanelColorTest(unittest.TestCase):
         """各面板样式里的**背景 / 边框**色必须只剩双色。"""
         text_ok = {TEXT.lower(), TEXT_DIM.lower()}
         for name, style in self._panel_styles():
+            # Win11 蓝只用于透明度滑杆的拖动球（功能圆球），不属于双色底色。
+            if name == "layers_dock._PANEL_STYLE":
+                style = re.sub(r"QSlider::handle:horizontal\s*\{[^}]*\}", "", style)
             for prop, value in re.findall(
                 r"(background|border[a-z-]*)\s*:\s*([^;{}]+);?", style
             ):
@@ -155,6 +164,23 @@ class PanelColorTest(unittest.TestCase):
         from rwmap.widgets import tilesets_dock
         self.assertEqual(tilesets_dock._BG.name().lower(), INK)
         self.assertEqual(tilesets_dock._GRID.name().lower(), ASH)
+
+    def test_tab_selection_is_dark_unselected_is_light(self):
+        """文档标签栏和图块集标签栏：选中用深色 INK，未选中用浅色 ASH。"""
+        from rwmap.app.main_window import _DOC_TAB_STYLE
+        from rwmap.widgets.tilesets_dock import _TAB_STYLE
+        for name, style in (("doc_tabs", _DOC_TAB_STYLE),
+                            ("tileset_tabs", _TAB_STYLE)):
+            self.assertIn(
+                f"QTabBar::tab:selected {{ background: {INK};",
+                style, f"{name} 选中标签应为深色 INK")
+            self.assertRegex(
+                style,
+                r"QTabBar::tab\s*\{[^}]*background: " + re.escape(ASH) + r";",
+                f"{name} 未选中标签应为浅色 ASH")
+            self.assertNotIn(
+                f"QTabBar::tab:selected {{ background: {ASH};",
+                style, f"{name} 选中标签不应再是浅色 ASH")
 
     def test_map_view_background_is_ink(self):
         """画布外底用 INK，且去掉原生浅色边框。"""
@@ -191,6 +217,14 @@ class FunctionalColorKeptTest(unittest.TestCase):
     def test_object_yellow_kept(self):
         from rwmap.view.object_layer_item import OBJECT_YELLOW
         self.assertEqual(OBJECT_YELLOW.name().lower(), "#ffc83c")
+
+    def test_win11_blue_round_controls_kept(self):
+        """透明度拖动球与单选选中球用 Win11 默认蓝，不污染双色底色。"""
+        from rwmap.widgets import layers_dock, tileset_editor
+        self.assertEqual(WIN11_BLUE.lower(), "#0078d4")
+        self.assertIn(f"background: {WIN11_BLUE}", layers_dock._PANEL_STYLE)
+        self.assertIn(WIN11_BLUE, tileset_editor._RADIO_CHECKED_STYLE)
+        self.assertNotIn(WIN11_BLUE, APP_QSS)
 
     def test_icon_blue_kept(self):
         from rwmap.widgets.object_toolbar import _ICON_BLUE

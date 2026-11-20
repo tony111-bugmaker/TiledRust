@@ -20,7 +20,10 @@ from PySide6.QtWidgets import (  # noqa: E402
 from rwmap.document.layer import ObjectLayer  # noqa: E402
 from rwmap.document.map_document import MapDocument  # noqa: E402
 from rwmap.document.map_object import MapObject  # noqa: E402
-from rwmap.document.properties import PropertyBag  # noqa: E402
+from rwmap.document.properties import (  # noqa: E402
+    HIDDEN_EDITOR_PROPERTIES, LEGACY_EDITOR_NODE_POS_PROPERTY,
+    PropertyBag,
+)
 from rwmap.theme import ASH, INK  # noqa: E402
 from rwmap.widgets.trigger_graph_dock import TriggerGraphDock  # noqa: E402
 from rwmap.widgets.trigger_inspector import (  # noqa: E402
@@ -131,6 +134,42 @@ class InspectorTest(unittest.TestCase):
         self.assertTrue(any("猛犸坦克" in l.text()
                             for l in self.ins.findChildren(QLabel)))
 
+    def test_private_editor_props_are_hidden_but_kept(self):
+        """rwmap_group / rwmap_node_pos / rwmap_noc 只在文件里，界面不显示。
+
+        截图里出现的 ``rwmap_noc`` 是节点图位置属性；分组属性此前已经隐藏。
+        现在两种位置属性都归入同一隐藏集合：属性行、添加下拉、节点图搜索
+        都看不到它们；切换触发器类型时也不能把这些布局信息删掉。
+        """
+        obj = self._obj()
+        obj.properties.set("rwmap_group", "Alpha", "string")
+        obj.properties.set("rwmap_node_pos", "12,34", "string")
+        obj.properties.set(LEGACY_EDITOR_NODE_POS_PROPERTY, "0,0", "string")
+        self.ins.show_node(self.ins.node)
+        QApplication.processEvents()
+        rows = {k for k, _e, _h in self.ins._prop_rows}
+        picker = {self.ins.prop_select.itemData(i)
+                  for i in range(self.ins.prop_select.count())}
+        for key in HIDDEN_EDITOR_PROPERTIES:
+            self.assertNotIn(key, rows)
+            self.assertNotIn(key, picker)
+        # 数据层仍然保留，供 TMX 往返与节点图布局恢复使用
+        for key in HIDDEN_EDITOR_PROPERTIES:
+            self.assertIn(key, obj.properties)
+
+        self.dock._group_page = "ALL"
+        self.dock.search_edit.setText("rwmap_noc")
+        QApplication.processEvents()
+        self.assertFalse(any(self.dock._matches(n)
+                             for n in self.dock.data.nodes.values()))
+        self.dock.search_edit.clear()
+        QApplication.processEvents()
+
+        self.ins.f_type.setCurrentIndex(self.ins.f_type.findData("point"))
+        QApplication.processEvents()
+        for key in HIDDEN_EDITOR_PROPERTIES:
+            self.assertIn(key, self._obj().properties)
+
     def test_switch_type_removes_all_non_matching_props(self):
         before = dict(self._obj().properties.values)
         self.assertIn("unitType", before)
@@ -200,3 +239,65 @@ class InspectorTest(unittest.TestCase):
         self.assertGreater(self.dock.inspector.width(), 0)
         pix = self.dock.grab()
         self.assertGreater(pix.width(), 100)
+
+
+class NoFlashWindowTest(unittest.TestCase):
+    """回归：属性面板重建时不得闪出无标题顶层窗。
+
+    真凶：vhint 是无 parent 的 QLabel，若在 addWidget 之前调用
+    setVisible(True)，Qt 会把它当顶层窗口显示（带系统三键、无文字），
+    addWidget 后才挂回父级 → 一闪而过的空窗，属性越多弹得越多。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from rwmap.widgets.trigger_graph_dock import collect_graph
+        self.doc = make_doc()
+        data = collect_graph(self.doc)
+        self.node = next(iter(data.nodes.values()))
+        self.ins = __import__(
+            "rwmap.widgets.trigger_inspector", fromlist=["TriggerInspector"]
+        ).TriggerInspector()
+
+    def test_setvisible_called_only_when_parented(self):
+        """监听所有 setVisible(True)：调用瞬间控件必须已有 parent。"""
+        from PySide6.QtWidgets import QWidget
+        original = QWidget.setVisible
+        offenders = []
+
+        def guarded(self_widget, visible):
+            if visible and self_widget.parent() is None:
+                offenders.append((type(self_widget).__name__,
+                                  self_widget.windowTitle()))
+            return original(self_widget, visible)
+
+        QWidget.setVisible = guarded
+        try:
+            for _ in range(5):
+                self.ins.show_node(self.node, [], self.doc.layers[0])
+                QApplication.processEvents()
+        finally:
+            QWidget.setVisible = original
+        self.assertEqual(offenders, [],
+                         "仍有控件在无 parent 时 setVisible(True): %r"
+                         % (offenders,))
+
+    def test_no_new_visible_toplevels_during_rebuild(self):
+        """真实重建：不得新增可见顶层窗。"""
+        self.ins.show_node(self.node, [], self.doc.layers[0])
+        QApplication.processEvents()
+        base = {id(w) for w in QApplication.topLevelWidgets()}
+        for _ in range(8):
+            self.ins.show_node(self.node, [], self.doc.layers[0])
+            QApplication.processEvents()
+        new_visible = [
+            w for w in QApplication.topLevelWidgets()
+            if id(w) not in base and w.isVisible()
+        ]
+        self.assertEqual(new_visible, [],
+                         "重建冒出可见顶层窗: %r"
+                         % [(type(w).__name__, w.windowTitle())
+                            for w in new_visible])

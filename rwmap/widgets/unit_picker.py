@@ -12,12 +12,13 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from ..rw import unit_names
 from ..rw.unit_names import CN_TO_RAW, RAW_TO_CN, to_cn, to_raw
 from ..theme import ASH, INK, TEXT, TEXT_DIM
+from ..widgets.plain_spinbox import PlainSpinBox
 
 
 def _canonical(raw: str) -> str:
@@ -97,7 +98,7 @@ class UnitPickerDialog(QDialog):
         vbox.setContentsMargins(6, 6, 6, 6)
         vbox.setSpacing(3)
 
-        self._boxes: list[tuple[str, str, QPushButton, QSpinBox]] = []
+        self._boxes: list[tuple[str, str, QPushButton, PlainSpinBox]] = []
         self._meta: dict[str, tuple[str, bool]] = {}   # raw -> (分组, 内部变体)
         rows = [(r["raw"], (r.get("cn") or r.get("en") or r["raw"]),
                  r.get("group") or "其他", bool(r.get("hidden")))
@@ -131,7 +132,7 @@ class UnitPickerDialog(QDialog):
                 f"border:1px solid {INK};}}")
             hl.addWidget(box, 1)
 
-            spin = QSpinBox()
+            spin = PlainSpinBox()
             spin.setRange(1, 99)
             spin.setFixedWidth(58)
             spin.setValue(max(1, int(round(weights.get(raw, 1)))))

@@ -21,10 +21,11 @@ from PySide6.QtCore import Qt, QRect, QRectF, QPointF, QSize, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QVBoxLayout, QWidget,
 )
 
 from ..document.gid import split_gid
+from ..widgets.plain_spinbox import PlainSpinBox
 from ..rw.resize import connected_blocks
 from ..theme import INK, TEXT_DIM
 from ..tilesets.tile_cache import get_pixmap
@@ -295,7 +296,7 @@ class ResizeMapDialog(QDialog):
         self.resize(560, 520)
 
         def spin(value, minimum=-10000, maximum=10000):
-            s = QSpinBox(self)
+            s = PlainSpinBox(self)
             s.setRange(minimum, maximum)
             s.setValue(value)
             s.setSuffix(" 块")

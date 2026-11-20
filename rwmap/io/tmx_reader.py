@@ -183,21 +183,34 @@ def read_document(path, profile=None, resolver: ResourceResolver | None = None) 
 
 
 def _strip_decor_cells(doc: MapDocument) -> None:
-    """读盘时把上一轮投影产生的装饰瓦片从内存 cells 里抹掉。
+    """读盘时把上一轮投影产生的装饰瓦片从内存 cells 里还原掉。
 
-    这些 gid 是编辑器自己写进去的游戏贴图，不是用户画的地图数据。留着会
-    让 Items 层在画布上和图片对象重叠显示一份；DOM 里仍保留（游戏要读），
-    下次保存时 ``game_decor`` 会全量重投影。
+    这些 gid 是编辑器自己写进去的游戏贴图（铺在 Ground 层），不是用户画的
+    地形。装饰 tile 定义里记了 ``rwmap_original_gid``（被覆盖的原地形 gid），
+    读到时还原成原 gid，画布上就能显示原本的地形（图片仍由对象层对象呈现）；
+    DOM 里仍保留装饰瓦片（游戏要读），下次保存 ``game_decor`` 会全量重投影。
+    旧版本文件没有 original_gid 记录时，退回抹成 0。
     """
-    ranges = [(ts.firstgid, ts.last_gid) for ts in doc.tilesets
-              if (ts.name or "").startswith(game_decor.DECOR_TILESET_PREFIX)]
+    ranges: list[tuple[int, int]] = []
+    originals: dict[int, int] = {}
+    for ts in doc.tilesets:
+        if not (ts.name or "").startswith(game_decor.DECOR_TILESET_PREFIX):
+            continue
+        ranges.append((ts.firstgid, ts.last_gid))
+        for local_id, bag in ts.tiles.items():
+            raw = bag.get(game_decor.DECOR_ORIGINAL_GID_PROP)
+            if raw is not None:
+                try:
+                    originals[ts.firstgid + local_id] = int(raw)
+                except (TypeError, ValueError):
+                    pass
     if not ranges:
         return
     for layer in doc.tile_layers():
         for index, raw in enumerate(layer.cells):
             gid = int(raw) & 0x0FFFFFFF
             if any(lo <= gid <= hi for lo, hi in ranges):
-                layer.cells[index] = 0
+                layer.cells[index] = originals.get(gid, 0)
 
 
 def _apply_layer_rules(doc: MapDocument) -> None:

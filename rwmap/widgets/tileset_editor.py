@@ -36,11 +36,17 @@ from .tile_property_defs import (
     detect_category, other_category_keys,
 )
 from .trigger_inspector import THEME
-from ..theme import ASH, INK, TEXT, TEXT_DIM
+from ..theme import ASH, INK, TEXT, TEXT_DIM, WIN11_BLUE
 
 
 _BG = QColor(INK)
 _GRID = QColor(ASH)
+
+# 单选按钮的选中圆球用 Windows 11 默认强调蓝；复选框仍是双色灰阶。
+_RADIO_CHECKED_STYLE = (
+    f"QRadioButton::indicator:checked{{background:{WIN11_BLUE};"
+    f"border:1px solid {WIN11_BLUE};}}"
+)
 
 
 def _clear_layout(layout):
@@ -53,6 +59,9 @@ def _clear_layout(layout):
             sub = widget.layout()
             if sub is not None:
                 _clear_layout(sub)
+            # 先隐藏再摘父级：可见控件 setParent(None) 会瞬间变成顶层窗口，
+            # Windows 给它配无标题的系统三键标题栏，一闪而过（空窗假象）。
+            widget.hide()
             widget.setParent(None)
             widget.deleteLater()
         elif item.layout() is not None:
@@ -367,8 +376,7 @@ class TilePropertyEditor(QWidget):
                 spacing:7px;padding:2px 0;background:transparent;}}
             QRadioButton::indicator{{width:13px;height:13px;border-radius:7px;
                 border:1px solid {ASH};background:{THEME['input']};}}
-            QRadioButton::indicator:checked{{background:{THEME['accent']};
-                border:1px solid {THEME['accent']};}}
+            {_RADIO_CHECKED_STYLE}
             QCheckBox::indicator{{width:13px;height:13px;border-radius:3px;
                 border:1px solid {ASH};background:{THEME['input']};}}
             QCheckBox::indicator:checked{{background:{THEME['accent']};

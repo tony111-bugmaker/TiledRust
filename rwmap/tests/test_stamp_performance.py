@@ -210,5 +210,55 @@ class StampPreviewCacheTest(unittest.TestCase):
                             "可见区域外仍被逐格绘制")
 
 
+class StampDrawTest(unittest.TestCase):
+    def test_picking_tile_or_rect_switches_back_to_brush(self):
+        """选瓦片/矩形印章必须回到画笔，否则 MapView 不派发落笔事件。"""
+        w, layer, _doc = _small_window()
+        w._set_object_tool("rect")
+        self.assertEqual(w.view.object_mode, "rect")
+
+        w._on_gid(7)
+        self.assertEqual(w.state.tool_id, "brush")
+        self.assertEqual(w.view.object_mode, "brush")
+        self.assertEqual(w.state.brush_gid, 7)
+
+        w._set_object_tool("rect")
+        w._on_stamp([[7, 8], [9, 10]])
+        self.assertEqual(w.view.object_mode, "brush")
+        self.assertEqual(w.state.stamp, [[7, 8], [9, 10]])
+
+        w._on_press(5, 5)
+        w._on_release()
+        self.assertEqual([layer.get(c, r) for r in (4, 5) for c in (4, 5)],
+                         [7, 8, 9, 10])
+
+    def test_automap_toggle_restores_set_layer_display(self):
+        """绘制时自动地图关闭后，set 层不该保持半透明可见。"""
+        from rwmap.document.layer import TileLayer
+        from rwmap.document.map_document import MapDocument
+
+        w, ground, _ = _small_window()
+        marker = TileLayer(width=12, height=12, name="set",
+                           cells=[0] * 144, readonly=False)
+        marker.visible = False
+        marker.opacity = 1.0
+        doc = MapDocument(width=12, height=12, tile_w=20, tile_h=20,
+                          layers=[ground, marker], tilesets=[])
+        w.state.doc = doc
+        w.state.current_layer = ground
+        w.scene.set_document(doc)
+
+        with mock.patch.object(w, "_load_automap_rules", return_value=True):
+            w._toggle_automap(True)
+            self.assertTrue(marker.visible)
+            self.assertAlmostEqual(marker.opacity, 0.35)
+            self.assertIs(w.state.current_layer, marker)
+
+            w._toggle_automap(False)
+            self.assertFalse(marker.visible)
+            self.assertAlmostEqual(marker.opacity, 1.0)
+            self.assertIs(w.state.current_layer, ground)
+
+
 if __name__ == "__main__":
     unittest.main()

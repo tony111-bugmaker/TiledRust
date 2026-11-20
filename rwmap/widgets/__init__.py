@@ -11,13 +11,15 @@ from .panel_settings_dialog import PanelSettingsDialog
 from .new_map_dialog import NewMapDialog
 from .resize_map_dialog import ResizeMapDialog
 from .dock_chrome import (
-    DockTitleBar, apply_panel_theme, install_title_bar, native_dock_icons,
+    DockTitleBar, apply_panel_theme, install_dock_border, install_title_bar,
+    native_dock_icons,
 )
+from .dock_overlap import install_dock_tab_detach, overlap_panels
 
 __all__ = [
     "LayersDock", "TilesetsDock", "TilesetPropsDock", "TilesetTilePropsDock",
     "PropertiesDock",
     "TriggersDock", "TriggerGraphDock", "ProbeWindow", "ObjectToolBar",
-    "PanelSettingsDialog", "ResizeMapDialog", "NewMapDialog", "DockTitleBar", "install_title_bar", "apply_panel_theme",
-    "native_dock_icons",
+    "PanelSettingsDialog", "ResizeMapDialog", "NewMapDialog", "DockTitleBar", "install_title_bar", "install_dock_border", "apply_panel_theme",
+    "native_dock_icons", "install_dock_tab_detach", "overlap_panels",
 ]

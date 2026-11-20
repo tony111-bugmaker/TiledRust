@@ -11,10 +11,11 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QSpinBox, QVBoxLayout,
+    QPushButton, QVBoxLayout,
 )
 
 from ..document.tileset import Tileset
+from ..widgets.plain_spinbox import PlainSpinBox
 from ..document.tileset_document import TilesetDocument
 from ..theme import TEXT_DIM
 
@@ -41,22 +42,22 @@ class NewTilesetDialog(QDialog):
         self.name_edit = QLineEdit("新图集")
         form.addRow("名称", self.name_edit)
 
-        self.tw_spin = QSpinBox()
+        self.tw_spin = PlainSpinBox()
         self.tw_spin.setRange(1, 512)
         self.tw_spin.setValue(default_tile)
         form.addRow("瓦片宽 (px)", self.tw_spin)
 
-        self.th_spin = QSpinBox()
+        self.th_spin = PlainSpinBox()
         self.th_spin.setRange(1, 512)
         self.th_spin.setValue(default_tile)
         form.addRow("瓦片高 (px)", self.th_spin)
 
-        self.margin_spin = QSpinBox()
+        self.margin_spin = PlainSpinBox()
         self.margin_spin.setRange(0, 64)
         self.margin_spin.setValue(0)
         form.addRow("边距 margin", self.margin_spin)
 
-        self.spacing_spin = QSpinBox()
+        self.spacing_spin = PlainSpinBox()
         self.spacing_spin.setRange(0, 64)
         self.spacing_spin.setValue(0)
         form.addRow("间隔 spacing", self.spacing_spin)

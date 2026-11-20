@@ -36,10 +36,10 @@ from PySide6.QtGui import (
     QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import (
-    QComboBox, QDockWidget, QGraphicsItem, QGraphicsLineItem, QGraphicsObject,
-    QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
-    QLineEdit, QMenu, QPushButton, QSplitter, QVBoxLayout, QWidget,
-    QInputDialog,
+    QApplication, QComboBox, QDockWidget, QGraphicsItem, QGraphicsLineItem,
+    QGraphicsObject, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QSplitter,
+    QVBoxLayout, QWidget, QInputDialog,
 )
 
 from ..commands.object_command import capture, push_object_edit
@@ -48,8 +48,9 @@ from ..document.map_document import allocate_trigger_id, used_trigger_ids
 from ..document.map_object import object_uid
 from ..document.properties import (
     EDITOR_GROUP_PROPERTY, EDITOR_NODE_POS_PROPERTY,
+    HIDDEN_EDITOR_PROPERTIES,
 )
-from ..theme import ASH, INK, TEXT, TEXT_DIM, qc
+from ..theme import ASH, INK, PANEL_BORDER_QSS, TEXT, TEXT_DIM, qc
 from .dock_chrome import install_title_bar
 from .trigger_inspector import (
     EDGE_COLORS, THEME, TYPE_COLORS, TriggerInspector, color_for,
@@ -382,10 +383,9 @@ class NodeItem(QGraphicsObject):
         # 节点层级高于连线（连线 z=1），边框永远压在绿色连线上，不会被盖住
         self.setZValue(20)
         self.setPos(node.x, node.y)
-        self.setToolTip(
-            f"{obj.label}\n类型：{type_label(obj.type_)}（{obj.type_ or '空'}）\n"
-            f"形状：{obj.shape_label}\n层：{self.node.layer_name}\n"
-            "右侧属性可直接编辑并走撤销栈；新增对象请在地图画布上操作")
+        # 不设 tooltip：右键框选后鼠标停在节点上，Qt 会延迟弹出一个深色圆角
+        # QTipLabel，一闪而过（用户看到的「空框」）。节点信息在 banner 与右侧
+        # 属性面板都有，去掉悬浮提示不影响任何功能。
 
     def boundingRect(self):
         return QRectF(-PORT_R - 2, -2, NODE_W + 2 * PORT_R + 4, NODE_H + 4)
@@ -469,7 +469,7 @@ class NodeItem(QGraphicsObject):
         max_rows = 2 if self.group else 3
         for key in summary_keys(obj.type_) + tuple(props.values.keys()):
             if (key == "id" or key in LINK_PROPS
-                    or key == EDITOR_GROUP_PROPERTY
+                    or key in HIDDEN_EDITOR_PROPERTIES
                     or any(r[0] == key for r in rows)):
                 continue
             value = props.get(key)
@@ -923,6 +923,9 @@ class GraphView(QGraphicsView):
         self.setDragMode(QGraphicsView.NoDrag)
         # 右键只用于「框选」，绝不弹任何上下文菜单 / 小窗口
         self.setContextMenuPolicy(Qt.NoContextMenu)
+        # 鼠标事件实际落在 viewport 子控件上；只关 view 不够，viewport 默认
+        # DefaultContextMenu，右键拖动结束会弹一个空白小菜单（一闪而过）。
+        self.viewport().setContextMenuPolicy(Qt.NoContextMenu)
         # 关键：鼠标事件实际落在 view 的 viewport 子控件上，且显示的光标也是
         # viewport 的光标。所以追踪与 setCursor 必须作用在 viewport 上，否则：
         # ① 纯悬停（不按键）的 mouseMoveEvent 永不触发 → 十字光标不出现；
@@ -950,27 +953,10 @@ class GraphView(QGraphicsView):
         self._auto_scroll_timer.timeout.connect(self._auto_scroll_tick)
 
     def paintEvent(self, event):
+        # 边缘判定区（四周窄带）此前会在拖动节点时画半透明色条，按用户要求隐藏：
+        # 只保留「进入边缘持续滚动」的功能逻辑（_edge_direction / 定时器），
+        # 不再有任何可见提示。判定的功能测试不依赖绘制，故直接去掉绘制段。
         super().paintEvent(event)
-        # 仅拖动节点时显示四周判定区（细窄半透明边条，命中那条会高亮），
-        # 平时完全不画，不干扰正常视图。
-        dock = self.scene().dock if self.scene() is not None else None
-        if dock is None or dock._dragging_key is None:
-            return
-        vp = self.viewport()
-        w, h, t = vp.width(), vp.height(), self.EDGE_ZONE_PX
-        if w <= 0 or h <= 0:
-            return
-        dx, dy = self._edge_dir
-        base = QColor(120, 180, 255, 22)     # 未命中：很淡的蓝
-        hot = QColor(95, 210, 138, 58)       # 命中：偏绿的醒目高亮
-        p = QPainter(vp)
-        p.setPen(Qt.NoPen)
-        # 上 / 下 / 左 / 右四条，命中方向用 hot 高亮
-        p.fillRect(QRectF(0, 0, w, t), hot if dy < 0 else base)
-        p.fillRect(QRectF(0, h - t, w, t), hot if dy > 0 else base)
-        p.fillRect(QRectF(0, 0, t, h), hot if dx < 0 else base)
-        p.fillRect(QRectF(w - t, 0, t, h), hot if dx > 0 else base)
-        p.end()
 
     def zoom(self) -> float:
         return float(self.transform().m11())
@@ -1096,9 +1082,20 @@ class GraphView(QGraphicsView):
             dock = self.scene().dock
             items = [i for i in dock.node_items.values()
                      if i.sceneBoundingRect().intersects(rect)]
-            self.scene().clearSelection()
-            for it in items:
-                it.setSelected(True)
+            # 批量选中：先屏蔽 selectionChanged，避免每 setSelected 一次就跑
+            # 一遍 _on_selection_changed（全量重建属性面板 + 回主画布刷新选中
+            # 手柄）。框住 N 个节点原本会把整条链跑 N 次，对象多时明显卡顿；
+            # 循环结束统一跑一次即可，选中结果完全相同。
+            self.scene().blockSignals(True)
+            try:
+                self.scene().clearSelection()
+                for it in items:
+                    it.setSelected(True)
+            finally:
+                self.scene().blockSignals(False)
+            # 一次回调完成：同组扩容 + 更新 _selected_keys + 重建一次属性面板
+            # + 只回主画布一次。
+            dock._on_selection_changed()
             event.accept()
             return
         if self._panning and event.button() == Qt.LeftButton:
@@ -1301,6 +1298,9 @@ class TriggerGraphDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("触发器节点图", parent)
         self.setObjectName("panels.trigger_graph")
+        # 浮动状态下本 dock 是独立顶层窗口：右键菜单事件冒泡到这里时，若仍是
+        # 默认策略会弹出一个空的原生菜单（一闪而过的空框）。顶层一律关掉。
+        self.setContextMenuPolicy(Qt.NoContextMenu)
         self.doc = None
         self.data = GraphData()
         self.undo_stack = None
@@ -1393,8 +1393,7 @@ class TriggerGraphDock(QDockWidget):
         bar.addSpacing(8)
         self.layer_combo = QComboBox()
         self.layer_combo.setFixedWidth(150)
-        self.layer_combo.setToolTip(
-            "只看选中的对象层（默认 Triggers）；跨层引用仍会解析，只是不显示别层节点")
+        # 不设 tooltip：见 NodeItem 说明，避免右键操作后弹出一闪而过的 QTipLabel
         bar.addWidget(self.layer_combo)
         bar.addStretch(1)
         root.addLayout(bar)
@@ -1405,8 +1404,7 @@ class TriggerGraphDock(QDockWidget):
         self.btn_new_group = QPushButton("新建组")
         self.group_combo = QComboBox()
         self.group_combo.setFixedWidth(140)
-        self.group_combo.setToolTip(
-            "分组页：选择已有组=未分组的那一页；点其它组名只看该组的节点")
+        # 不设 tooltip：见 NodeItem 说明，避免右键操作后弹出一闪而过的 QTipLabel
         self.btn_color_by_group = QPushButton("按组着色")
         self.btn_color_by_group.setCheckable(True)
         for btn in (self.btn_new_group, self.group_combo,
@@ -1452,9 +1450,10 @@ class TriggerGraphDock(QDockWidget):
 
         self.setWidget(holder)
         install_title_bar(self)
-        # 浮动 QDockWidget 的原生 1px 边框在部分平台是白色，显式压成深色
+        # 浮动 QDockWidget 的原生边框在部分平台是白色，显式压成统一的
+        # 1px ASH 暗线（所有面板共用 theme.PANEL_BORDER_QSS）。
         self.setStyleSheet(
-            f"QDockWidget{{border:1px solid {ASH};background:{INK};}}")
+            f"QDockWidget{{{PANEL_BORDER_QSS}background:{INK};}}")
         self.setMinimumSize(560, 380)
 
         # ---- 信号 ----
@@ -2151,7 +2150,7 @@ class TriggerGraphDock(QDockWidget):
         hay = [node.obj.label, node.obj.type_, node.tid, node.layer_name,
                node.obj.shape_label]
         hay += [f"{k}={v}" for k, v in node.obj.properties.items()
-                if k != EDITOR_GROUP_PROPERTY]
+                if k not in HIDDEN_EDITOR_PROPERTIES]
         return any(needle in str(s).lower() for s in hay)
 
     def _apply_filter(self, *_args):

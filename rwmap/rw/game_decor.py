@@ -13,8 +13,10 @@
   ``<object name="建康府" type="mapText" ...>`` + 这三个属性。
 * **图片** ``shape=image`` → 对象本身降级为 ``type=info`` 注释节点（官方
   ``embedded_custom_tileset_example.tmx`` 里就是这么写 readme 的，游戏会忽略），
-  再把图片切成瓦片做成 ``embedded_png`` 内嵌图集，铺进 ``Items`` 瓦片层，
-  游戏里就能真正看到这张图。
+  再把图片切成瓦片做成 ``embedded_png`` 内嵌图集，铺进 ``Ground`` 瓦片层
+  （替换掉被覆盖格的地形显示），并把每个瓦片原本覆盖的地形通行属性复制到
+  装饰图集的对应 tile 上——属性跟着瓦片走，游戏按标准 tileset tile 属性
+  读取，通行规则保持不变。``Items`` 层完全不碰，资源池 / 树 / 石头不受影响。
 
 官方说明原文（嵌在示例地图的 tileset 属性里）：
     "Embedded images are created by creating a string called 'embedded_png'
@@ -22,8 +24,8 @@
      string into the text of this property."
 
 保存时全量重投影：图片对象被移动 / 缩放 / 删除后，下次保存会先清掉旧的
-装饰瓦片再重新铺，因此永远不会留下「幽灵贴图」。内存里的 Items 层 cells
-在写盘后恢复原样，编辑器里看到的仍是干净的地图数据。
+装饰瓦片再重新铺，因此永远不会留下「幽灵贴图」。内存里的 Ground 层 cells
+在写盘后恢复原样，编辑器里看到的仍是干净的地形数据。
 """
 from __future__ import annotations
 
@@ -33,12 +35,26 @@ from pathlib import Path
 
 from lxml import etree
 
+from ..document.gid import GID_MASK
 from ..document.layer import ObjectLayer, TileLayer
-from ..io.layer_codec import decode
 
 DECOR_TILESET_PREFIX = "rwmap_decor_"
 IMAGE_NOTE_TYPE = "info"
 TEXT_TRIGGER_TYPE = "mapText"
+
+# 图片瓦片需要从被覆盖的原地形 tile 继承的「通行属性」键。只搬这些键：
+# unit/team 等单位标记不能带上（图片不是单位），未知属性也一律不继承。
+# 与 tile_property_defs.TERRAIN_KEYS 保持一致，但 res_pool 排除（资源池只在
+# Items 层生效，且用户明确要求图片不能碰资源池）。
+INHERIT_TILE_KEYS = (
+    "water", "water-bridge", "cliff", "cliff-soft", "large-cliff",
+    "lava-cliff", "lava", "block-land", "large-rock", "small-rock", "tree",
+)
+
+# 内嵌装饰图集里记录每个装饰瓦片「原本覆盖了哪个地形 gid」。这是本编辑器
+# 私有属性，游戏不读、无副作用；读盘时据此把装饰 gid 还原成原地形，保证反复
+# 保存幂等、原地形属性不丢。
+DECOR_ORIGINAL_GID_PROP = "rwmap_original_gid"
 
 _LAYER_TAGS = {"layer", "objectgroup", "imagelayer"}
 
@@ -167,31 +183,50 @@ def _items_layer(doc, create: bool):
     return layer, True
 
 
-def _base_cells(layer: TileLayer, old_ranges):
-    """以盘面上的真实 cells 为基底，清掉上一轮投影留下的装饰瓦片。"""
-    cells = None
-    if layer.data_element is not None and layer.encoding:
-        try:
-            cells, enc, comp = decode(layer.data_element,
-                                      layer.width * layer.height)
-            layer.encoding = enc or layer.encoding
-            layer.compression = comp
-        except Exception:
-            cells = None
-    if cells is None:
-        cells = list(layer.cells)
+def _base_cells(layer: TileLayer) -> list[int]:
+    """取内存 cells 作投影基底，长度规整到 width*height。
+
+    必须用内存 ``layer.cells`` 为准：data_element 是上次写盘的快照，用户后来
+    手画的瓦片不会同步进去，以它为基底会把用户新画的地形抹掉。读盘时装饰 gid
+    已由 ``_strip_decor_cells`` 还原成原地形 gid，所以内存基底是干净的。
+    """
+    cells = list(layer.cells)
     need = layer.width * layer.height
     if len(cells) < need:
         cells.extend([0] * (need - len(cells)))
-    cells = cells[:need]
-    if not old_ranges:
-        return cells
-    cleaned = []
-    for raw in cells:
-        gid = int(raw) & 0x0FFFFFFF
-        cleaned.append(0 if any(lo <= gid <= hi for lo, hi in old_ranges)
-                       else raw)
-    return cleaned
+    return cells[:need]
+
+
+def _terrain_props_of_gid(doc, raw_gid: int) -> dict[str, str]:
+    """取某个地形 gid 对应 tile 的通行属性，只保留 INHERIT_TILE_KEYS。"""
+    located = doc.local_tile(raw_gid)
+    if located is None:
+        return {}
+    ts, local_id = located
+    bag = ts.tile_props(local_id)
+    return {k: v for k, v in bag.items() if k in INHERIT_TILE_KEYS}
+
+
+def _collect_orig_gids(elements) -> dict[int, int]:
+    """从旧装饰图集的 tile 定义里读出「装饰 gid → 原地形 gid」映射。
+
+    写盘前删旧图集之前调用：即使读盘的 strip 因故没还原，也能据这张表把内存
+    里残留的旧装饰 gid 换回原地形，保证反复保存幂等、属性不丢。
+    """
+    out: dict[int, int] = {}
+    for ts_el in elements:
+        firstgid = _int(ts_el.get("firstgid"))
+        for tile_el in ts_el.findall("tile"):
+            local_id = _int(tile_el.get("id"))
+            orig = None
+            for props in tile_el.findall("properties"):
+                for prop in props.findall("property"):
+                    if prop.get("name") == DECOR_ORIGINAL_GID_PROP:
+                        orig = _int(prop.get("value") or prop.text)
+                        break
+            if orig is not None:
+                out[firstgid + local_id] = orig
+    return out
 
 
 def _image_objects(doc):
@@ -238,15 +273,23 @@ def _decor_png(src: Path, obj, doc, cache):
 
 
 def sync_decor_to_game(doc, target) -> tuple[object, int]:
-    """在写盘前把图片对象投影成游戏可见的内嵌图集贴图。
+    """写盘前把图片对象投影成游戏可见的内嵌图集贴图。
 
-    返回 ``(restore, count)``；调用方必须在写完文件后（含异常路径）执行
-    ``restore()``，把内存里的 Items 层 cells 还原成用户编辑的干净数据。
+    图片瓦片铺进 ``Ground`` 层（替换被覆盖格的地形显示），同时每个装饰 tile
+    在定义上继承被覆盖原地形 tile 的通行属性（``INHERIT_TILE_KEYS``），并记下
+    原 gid（``DECOR_ORIGINAL_GID_PROP``）。这样：
+    * 游戏看到图片，通行规则仍是原地形的（水/悬崖/岩浆等不会因图片失效）；
+    * ``Items`` 层完全不碰，资源池 / 树 / 石头不会被图片覆盖。
+
+    返回 ``(restore, count)``；调用方写完文件后（含异常路径）必须执行
+    ``restore()``，把内存里的 Ground cells 还原成用户编辑的干净地形数据。
     ``count`` 是本次成功贴图的图片数。
     """
     root = doc.tree.getroot()
     old = _decor_tileset_elements(root)
     old_ranges = _old_gid_ranges(old)
+    # 删旧图集前先收集「旧装饰 gid → 原地形 gid」，用于还原内存基底。
+    orig_by_gid = _collect_orig_gids(old)
     for el in old:
         root.remove(el)
     doc.tilesets[:] = [ts for ts in doc.tilesets
@@ -261,19 +304,26 @@ def sync_decor_to_game(doc, target) -> tuple[object, int]:
             layer.dirty = True
 
     images = _image_objects(doc)
-    layer, created = _items_layer(doc, create=bool(images or old_ranges))
-    if layer is None:
+    # 目标层是 Ground：图片替换地形显示；没有 Ground（异常地图）就不投影。
+    ground = doc.layer_by_name("Ground")
+    if not isinstance(ground, TileLayer):
         return (lambda: None), 0
-    saved_cells, saved_dirty = list(layer.cells), layer.dirty
+    saved_cells, saved_dirty = list(ground.cells), ground.dirty
 
     def restore():
-        layer.cells = saved_cells
-        layer.dirty = saved_dirty
+        ground.cells = saved_cells
+        ground.dirty = saved_dirty
 
-    cells = _base_cells(layer, old_ranges)
+    # 内存基底：先清掉上一轮残留的装饰 gid（用 orig 映射还原成原地形）。
+    cells = _base_cells(ground)
+    if old_ranges:
+        for i, raw in enumerate(cells):
+            if any(lo <= (int(raw) & GID_MASK) <= hi for lo, hi in old_ranges):
+                cells[i] = orig_by_gid.get(int(raw) & GID_MASK, 0)
+
     if not images:
-        layer.cells = cells
-        layer.dirty = True
+        ground.cells = cells
+        ground.dirty = True
         return restore, 0
 
     firstgid = _next_firstgid(doc, root)
@@ -319,12 +369,23 @@ def sync_decor_to_game(doc, target) -> tuple[object, int]:
         row0 = max(0, round(obj.y / (doc.tile_h or 20)))
         for row in range(rows):
             for col in range(cols):
-                if layer.in_bounds(col0 + col, row0 + row):
-                    cells[layer.index(col0 + col, row0 + row)] = (
-                        firstgid + row * cols + col)
+                c, r = col0 + col, row0 + row
+                if not ground.in_bounds(c, r):
+                    continue
+                idx = ground.index(c, r)
+                original = int(cells[idx]) & GID_MASK
+                # 装饰 tile 定义：记原 gid + 继承原地形通行属性。
+                tile_el = etree.SubElement(el, "tile", attrib={"id": str(row * cols + col)})
+                tprops = etree.SubElement(tile_el, "properties")
+                etree.SubElement(tprops, "property", attrib={
+                    "name": DECOR_ORIGINAL_GID_PROP, "value": str(original)})
+                for key, value in _terrain_props_of_gid(doc, original).items():
+                    etree.SubElement(tprops, "property", attrib={
+                        "name": key, "value": value})
+                cells[idx] = firstgid + row * cols + col
         firstgid += count
         made += 1
 
-    layer.cells = cells
-    layer.dirty = True
+    ground.cells = cells
+    ground.dirty = True
     return restore, made

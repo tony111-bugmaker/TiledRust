@@ -55,6 +55,14 @@ TOOL_EXTRA_SHORTCUTS = {
 # 统一在这里归一，避免两套状态机并存。
 LEGACY_TOOL_ALIASES = {"tileselect": "select"}
 
+# 这些工具只能在对象层使用；当前层不是对象层时整组置灰。
+# 与截图对应：编辑节点 → 插入文字这一整排（不含瓦片画笔 / 钢笔 / 橡皮 / 填充 /
+# 选择，它们在瓦片层同样要用）。4 个变换键由 MainWindow 另行同步。
+OBJECT_ONLY_TOOLS = (
+    "nodes", "rect", "point", "ellipse", "polygon", "polyline",
+    "tile", "template", "image", "text",
+)
+
 
 def canonical_tool_id(tid: str) -> str:
     return LEGACY_TOOL_ALIASES.get(tid, tid)
@@ -275,6 +283,8 @@ QToolButton:checked {{
     color: {TEXT};
 }}
 QToolButton:hover {{ background: rgba(36, 36, 36, 160); border-radius: 3px; }}
+QToolButton:disabled {{ background: transparent; color: {TEXT_DIM}; }}
+QToolButton:checked:disabled {{ background: transparent; }}
 """
 
 
@@ -345,6 +355,18 @@ class ObjectToolBar(QToolBar):
         # _build_toolbar() 里通过 add_transform_actions 追加；排在本文件的
         # 「瓦片画笔」文字标签之前（图标在左、文字在右）。
         self._transform_actions: list[QAction] = []
+
+    def set_object_layer_active(self, active: bool):
+        """当前层是否为对象层：控制「编辑节点 → 插入文字」整排按钮的启用态。
+
+        非对象层时按钮置灰（Qt 自动把图标画成禁用色，且 :checked 背景也被
+        QSS 去掉）；切回对象层后恢复。变换 4 键不在这里管，由 MainWindow
+        的 ``_refresh_transform_actions`` 同步。
+        """
+        for tid in OBJECT_ONLY_TOOLS:
+            action = self.actions_by_id.get(tid)
+            if action is not None:
+                action.setEnabled(active)
 
     def add_transform_actions(self, items):
         """把 4 个变换按钮排在「瓦片画笔」文字标签之前（图标左、文字右）。

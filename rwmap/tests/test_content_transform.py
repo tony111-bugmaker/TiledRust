@@ -81,6 +81,7 @@ class ContentTransformWindowTest(unittest.TestCase):
         w.state.doc = doc
         w.state.profile.write_enabled = True
         w.scene.set_document(doc)
+        w._on_layer_selected(self.layer)   # 显式选中对象层：对象工具整排才可用
         w._set_object_tool("select")
         w._refresh_transform_actions()
 
@@ -89,6 +90,51 @@ class ContentTransformWindowTest(unittest.TestCase):
 
     def actions(self):
         return self.w.object_toolbar._transform_actions
+
+    def object_tool_actions(self):
+        from rwmap.widgets.object_toolbar import OBJECT_ONLY_TOOLS
+        return [self.w.object_toolbar.actions_by_id[t]
+                for t in OBJECT_ONLY_TOOLS]
+
+    def tile_layer(self):
+        return next(l for l in self.w.state.doc.layers
+                    if isinstance(l, TileLayer))
+
+    def test_object_tools_enabled_on_object_layer(self):
+        self.assertTrue(all(a.isEnabled() for a in self.object_tool_actions()),
+                        "选中对象层时，编辑节点 → 插入文字整排按钮应可用")
+
+    def test_object_tools_disabled_on_tile_layer(self):
+        self.w._on_layer_selected(self.tile_layer())
+        self.assertFalse(any(a.isEnabled() for a in self.object_tool_actions()),
+                         "未选对象层时对象工具整排应置灰")
+        # 4 个变换键是按「有无目标」点亮的，不跟层走：见下一条用例。
+
+    def test_stamp_on_tile_layer_still_enables_transform_buttons(self):
+        """用户反馈：右键从瓦片层抓图章后，4 个键必须仍然点亮。"""
+        w = self.w
+        w._on_layer_selected(self.tile_layer())     # 抓图章时当前层是瓦片层
+        w._capture_region(2, 2, 3, 3)               # 模拟右键拖动生成图章
+        self.assertTrue(all(a.isEnabled() for a in self.actions()),
+                         "瓦片层抓到图章后 4 个变换键应点亮")
+        self.assertFalse(any(a.isEnabled() for a in self.object_tool_actions()),
+                         "但对象工具整排仍应保持置灰")
+        w._transform_content("flip_h")              # 点了确实能变换图章
+        self.assertEqual(len(w.state.stamp), 2)
+
+    def test_switch_back_to_object_layer_restores_buttons(self):
+        self.w._on_layer_selected(self.tile_layer())
+        self.w.state.stamp = [[1, 2], [3, 4]]
+        self.w._on_layer_selected(self.layer)
+        self.assertTrue(all(a.isEnabled() for a in self.object_tool_actions()))
+        self.assertTrue(all(a.isEnabled() for a in self.actions()))
+
+    def test_tile_tools_stay_enabled_on_tile_layer(self):
+        """瓦片画笔 / 橡皮 / 填充 / 选择不是对象工具，切到瓦片层仍应可用。"""
+        self.w._on_layer_selected(self.tile_layer())
+        bar = self.w.object_toolbar
+        for tid in ("brush", "eraser", "fill", "select"):
+            self.assertTrue(bar.actions_by_id[tid].isEnabled(), tid)
 
     def test_no_target_disables_all_four_buttons(self):
         self.assertFalse(any(a.isEnabled() for a in self.actions()),

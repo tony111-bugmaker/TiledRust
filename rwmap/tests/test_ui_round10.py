@@ -166,12 +166,13 @@ class Round10UiTest(unittest.TestCase):
         self.assertLess(w.layers_dock.y(), w.properties_dock.y())
         self.assertLess(w.properties_dock.y(), w.tilesets_dock.y())
 
-    def test_toolbars_share_one_row(self):
-        bars = [b for b in self.w.findChildren(QToolBar)
-                if b.windowTitle() in ("主工具栏", "对象工具")]
-        self.assertEqual(len(bars), 2)
-        self.assertEqual(bars[0].y(), bars[1].y(),
-                         "主工具栏与图标工具栏不在同一行")
+    def test_object_toolbar_has_own_row_below_tabs(self):
+        self.assertFalse(
+            any(b.windowTitle() == "主工具栏" for b in self.w.findChildren(QToolBar)),
+            "不应残留只有版本下拉的空工具栏行")
+        self.assertGreater(
+            self.w.object_toolbar.y(), self.w.tab_toolbar.y(),
+            "对象工具栏应独占文档标签栏下方一行")
 
 
 if __name__ == "__main__":
