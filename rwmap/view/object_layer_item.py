@@ -14,11 +14,16 @@
 """
 from __future__ import annotations
 
+import copy
 import math
+import weakref
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import (
+    QPointF, QRectF, Qt, QObject, Signal, QRunnable, QThreadPool,
+)
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
     QTransform,
@@ -58,6 +63,19 @@ _TILE_CACHE = 640.0                    # 每块场景边长
 _TILE_CACHE_MAX = 256                  # 块缓存上限（LRU 淘汰）
 _TILE_LODS = (1.0, 0.5, 0.25, 0.125)   # 与瓦片层 LOD 档位一致
 _TILE_CACHE_MIN_SPAN = 4200.0          # 跨度超此值才启用分块（单图上限 4096）
+
+# 异步建块开关（阶段 0 先落开关，阶段 2 才真正启用线程池）：
+# 超大场景首帧要同步建十几个 640² 块，实测阻塞 0.8~1 秒。开启后建块丢到
+# 线程池，GUI 线程只贴已建好的块，未就绪的块短暂留空（渐进填充）。
+# 游离 item（未 addItem，测试常用 scene() is None）始终走同步路径，
+# 保证现有缓存测试零改写即可通过。
+_ASYNC_TILES = True
+# 线程数 2 + 每帧最多派发 2 块：实测（真实 5516 对象图、6 块视口）：
+# 4 线程/无限派发时首帧主线程被快照+线程竞争拖到 140ms；
+# 2 线程/每帧 2 块时首帧降到 ~24ms（同步为 104ms），约 3 帧铺满。
+# 每帧快照本身就在 GUI 线程，派发太多会让主线程快照与 worker 抢 CPU/带宽。
+_TILE_POOL_MAX = 2
+_TILE_MAX_JOBS_PER_FRAME = 2
 
 _HALIGN = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
            "right": Qt.AlignRight, "justify": Qt.AlignJustify}
@@ -300,6 +318,245 @@ def clear_image_cache() -> None:
     _TRANSFORM_CACHE.clear()
 
 
+# ---------------------------------------------------------------------------
+# 纯绘制核心（无 self 依赖）
+# ---------------------------------------------------------------------------
+# 下面的 _paint_object_pure / build_tile_image 是「分块建块」的纯函数版本：
+# 不访问 ObjectLayerItem 的任何可变状态，只读传入的快照对象与 job。
+# 这样工作线程可以直接调用 build_tile_image 而完全不碰 GUI 线程的对象 / item。
+#
+# 与实例方法 _paint_object 保持逐行对应，只有两处差异：
+#   1. 位图来源：images 命中时走 drawImage（工作线程安全），否则回退到
+#      object_pixmap + drawPixmap（阶段 1 的同步路径，逐像素等同旧实现）；
+#   2. 字体来源：label_font 参数（主线程构造好的副本），而非模块常量——
+#      QFont 在工作线程新建会碰字体数据库，且测试会改 QApplication 默认字体。
+
+
+def _paint_object_pure(painter, obj, doc, *, is_selected: bool = False,
+                       preview: bool = False, show_label: bool = True,
+                       line_width: int | None = None,
+                       images: dict | None = None, label_font: QFont | None = None,
+                       show_nodes: bool = False):
+    """_paint_object 的纯函数版本；位图/字体可由外部注入。"""
+    rect = object_rect(obj, doc.tile_w, doc.tile_h)
+    if line_width is not None and line_width > 1:
+        base = QColor(255, 200, 60, 190)
+        pen = QPen(base, line_width)
+        painter.setPen(pen)
+    else:
+        painter.setPen(_PEN_PREVIEW if preview else
+                       (_PEN_SELECTED if is_selected else _PEN_NORMAL))
+    painter.setBrush(Qt.NoBrush)
+
+    shape = obj.shape
+    if shape == "ellipse":
+        painter.drawEllipse(rect)
+    elif shape == "point":
+        center = QPointF(obj.x, obj.y)
+        painter.drawEllipse(center, 6.0, 6.0)
+        painter.drawLine(center + QPointF(-10, 0), center + QPointF(10, 0))
+        painter.drawLine(center + QPointF(0, -10), center + QPointF(0, 10))
+    elif shape in ("polygon", "polyline"):
+        poly = QPolygonF([QPointF(obj.x + px, obj.y + py)
+                          for px, py in obj.points])
+        if shape == "polygon":
+            painter.setBrush(QBrush(QColor(255, 200, 60, 30)))
+            painter.drawPolygon(poly)
+            painter.setBrush(Qt.NoBrush)
+        else:
+            painter.drawPolyline(poly)
+    elif shape in ("tile", "image"):
+        qimg = images.get(id(obj)) if images else None
+        if qimg is not None:
+            # 工作线程安全路径：位图是主线程 toImage() 的快照。
+            painter.drawImage(rect, qimg, QRectF(0, 0, qimg.width(), qimg.height()))
+        else:
+            pix = object_pixmap(doc, obj)
+            if pix is not None:
+                painter.drawPixmap(rect, pix, QRectF(pix.rect()))
+            else:
+                painter.drawRect(rect)
+                painter.drawText(rect, Qt.AlignCenter, "图片缺失")
+    elif shape == "text":
+        style = obj.text_attr
+        painter.fillRect(rect, QColor(255, 248, 205, 210))
+        painter.drawRect(rect)
+        font = QFont(style["fontfamily"])
+        try:
+            font.setPixelSize(max(1, int(float(style["pixelsize"]))))
+        except (ValueError, TypeError):
+            font.setPixelSize(16)
+        font.setBold(style["bold"] in ("1", "true", "True"))
+        font.setItalic(style["italic"] in ("1", "true", "True"))
+        font.setUnderline(style["underline"] in ("1", "true", "True"))
+        font.setStrikeOut(style["strikeout"] in ("1", "true", "True"))
+        painter.setFont(font)
+        color = QColor(style["color"])
+        if not color.isValid():
+            color = QColor("#000000")
+        painter.setPen(color)
+        flags = (_HALIGN.get(style["halign"], Qt.AlignLeft)
+                 | _VALIGN.get(style["valign"], Qt.AlignTop))
+        if style["wrap"] in ("1", "true", "True"):
+            flags |= Qt.TextWordWrap
+        painter.drawText(rect.adjusted(2, 1, -2, -1), flags, obj.text)
+    else:  # rect
+        painter.drawRect(rect)
+
+    if is_selected and show_nodes and shape in ("polygon", "polyline"):
+        painter.setPen(QPen(QColor(255, 200, 60, 255), 1))
+        painter.setBrush(QBrush(QColor(90, 70, 20, 230)))
+        for px, py in obj.points:
+            painter.drawRect(QRectF(obj.x + px - 3, obj.y + py - 3, 6, 6))
+        painter.setBrush(Qt.NoBrush)
+
+    if show_label and not preview and (obj.name or obj.type_):
+        painter.setPen(_LABEL_YELLOW)
+        painter.setFont(label_font if label_font is not None else _LABEL_FONT)
+        painter.drawText(QPointF(rect.x(), rect.y() - 4), obj.label)
+
+
+@dataclass
+class TileBuildJob:
+    """一个建块任务所需的全部不可变输入（主线程快照后交给工作线程）。"""
+    key: tuple                      # (lod, bx, by)
+    lod: float
+    bx: int
+    by: int
+    doc: object                     # 只读：tile_w/tile_h/local_tile 等
+    entries: list = field(default_factory=list)  # [(snapshot_obj, bounds), ...]
+    images: dict = field(default_factory=dict)   # {id(snapshot_obj): QImage}
+    show_labels: bool = True
+    label_font: object | None = None
+    epoch: int = 0                  # 阶段 2 用；阶段 1 恒 0
+
+
+def build_tile_image(job: TileBuildJob) -> QImage:
+    """纯函数：按 job 生成一块缓存 QImage。可在工作线程安全调用。
+
+    只读取 job 内的快照数据；不访问任何 QGraphicsItem / QPixmap / 模块缓存
+    （位图已由主线程 toImage() 注入 job.images）。
+    """
+    side = max(1, int(math.ceil(_TILE_CACHE * job.lod)))
+    img = QImage(side, side, QImage.Format_ARGB32)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.scale(job.lod, job.lod)
+    p.translate(-job.bx * _TILE_CACHE, -job.by * _TILE_CACHE)
+    line_w = max(1, int(math.ceil(1.0 / job.lod)))
+    for obj, _bounds in job.entries:
+        if getattr(obj, "visible", True):
+            _paint_object_pure(p, obj, job.doc, is_selected=False,
+                               show_label=job.show_labels, line_width=line_w,
+                               images=job.images, label_font=job.label_font)
+    p.end()
+    return img
+
+
+# ---------------------------------------------------------------------------
+# 异步建块：线程池 + 信号桥
+# ---------------------------------------------------------------------------
+# QGraphicsItem 不是 QObject，无法直接声明 Signal，因此用一个 QObject 桥接
+# 对象承载 tileReady 信号：它在 GUI 线程构造（亲和 GUI 线程），worker 发信号
+# 后 Qt 自动按 QueuedConnection 把 _on_ready 投递回 GUI 线程执行。
+# weakref 指回 item，避免 item ↔ bridge 循环引用导致泄漏。
+
+
+def _clone_for_render(obj):
+    """渲染专用深拷贝：只复制纯绘制会读到的可变字段。
+
+    对齐 commands/object_command.py:_clone，但显式丢弃 xml_element——
+    工作线程绝不碰 lxml 节点（非线程安全且渲染根本用不到）。
+    """
+    c = copy.copy(obj)
+    if obj.properties is not None:
+        bag = copy.copy(obj.properties)
+        bag.values = dict(obj.properties.values)
+        bag.types = dict(obj.properties.types)
+        bag.text_props = set(obj.properties.text_props)
+        c.properties = bag
+    c.points = [tuple(p) for p in obj.points] if obj.points else []
+    c.text_style = dict(obj.text_style) if obj.text_style else {}
+    c.xml_element = None
+    return c
+
+
+def _snapshot_pixmaps(doc, entries, images: dict):
+    """GUI 线程：把块内 tile/image 对象的位图转成 QImage 快照注入 images。
+
+    QPixmap 依赖窗口管理器、不能在工作线程使用；这里在 GUI 线程调用现有
+    object_pixmap()（读模块级 QPixmap 缓存是安全的），立即 toImage() 得到
+    独立像素数据。工作线程只碰这份 QImage，全程不接触 QPixmap。
+    """
+    for obj, _bounds in entries:
+        if obj.shape in ("tile", "image"):
+            pix = object_pixmap(doc, obj)
+            if pix is not None and not pix.isNull():
+                images[id(obj)] = pix.toImage()
+
+
+@dataclass
+class TileBuildResult:
+    key: tuple
+    image: object | None   # QImage（worker 已 copy() 深拷贝）；None 表示建块失败
+    epoch: int
+    show_labels: bool
+
+
+class _TileResultBridge(QObject):
+    tileReady = Signal(object)
+
+    def __init__(self, item):
+        super().__init__()                  # GUI 线程构造 → 亲和 GUI 线程
+        self._item = weakref.ref(item)
+        self.tileReady.connect(self._on_ready)  # worker emit → queued 回 GUI
+
+    def _on_ready(self, result):
+        item = self._item()
+        if item is not None:
+            item._apply_tile_result(result)
+
+
+class _TileBuildRunnable(QRunnable):
+    def __init__(self, bridge, job: TileBuildJob):
+        super().__init__()
+        self._bridge = bridge
+        self._job = job
+
+    def run(self):
+        try:
+            img = build_tile_image(self._job)
+            # QImage 隐式共享：显式 copy() 深拷贝，避免 worker 局部对象析构后
+            # 主线程拿到的像素数据悬空（COW 生命周期坑）。
+            result = TileBuildResult(
+                self._job.key, img.copy(), self._job.epoch,
+                self._job.show_labels)
+        except Exception:
+            # 异常绝不能逸出工作线程，否则整个进程可能终止。发一个 image=None
+            # 的结果，让 GUI 线程清理 inflight（否则该块永远卡在"在途"状态，
+            # 后续 paint 一直跳过 → 永久空白）。
+            result = TileBuildResult(
+                self._job.key, None, self._job.epoch,
+                self._job.show_labels)
+        self._bridge.tileReady.emit(result)
+
+
+def _make_tile_pool() -> QThreadPool:
+    pool = QThreadPool()
+    pool.setMaxThreadCount(min(_TILE_POOL_MAX, max(1, QThreadPool.globalInstance().maxThreadCount())))
+    return pool
+
+
+_TILE_POOL: QThreadPool | None = None   # 首次在 GUI 线程惰性创建
+
+
+def _tile_pool() -> QThreadPool:
+    global _TILE_POOL
+    if _TILE_POOL is None:
+        _TILE_POOL = _make_tile_pool()
+    return _TILE_POOL
+
+
 class ObjectLayerItem(QGraphicsItem):
     def __init__(self, layer: ObjectLayer, doc, z_value: int = 0):
         super().__init__()
@@ -333,6 +590,13 @@ class ObjectLayerItem(QGraphicsItem):
         self._tile_labels: bool = True     # 缓存块里是否烘焙了标签
         self._tile_dirty_all: bool = False # 增删后置位，下帧清空重建
         self._tile_span: float | None = None
+        # 异步开关的逐 item 覆盖位：None=按全局规则（游离 item 走同步），
+        # True/False 由测试强制指定。
+        self._async_tiles_override: bool | None = None
+        # 异步建块的失效代次：任何失效都 +1，在途任务结果回来时代次不符就丢弃。
+        self._tile_epoch: int = 0
+        self._tile_inflight: dict = {}     # key -> 发起时的 epoch
+        self._tile_bridge: _TileResultBridge | None = None  # 惰性创建（GUI 线程）
         self.setZValue(z_value)
         self.setOpacity(layer.opacity)
         self.setVisible(layer.visible)
@@ -484,6 +748,7 @@ class ObjectLayerItem(QGraphicsItem):
         self.show_names = value
         self._cache_dirty = True   # 缓存里烘焙了标签，开关切换要重建
         self._tile_dirty_all = True
+        self._bump_tile_epoch()    # 作废在途建块（旧标签状态的结果不能落地）
         self.update(self.boundingRect())
 
     def refresh_rects(self, rects, objects=None):
@@ -511,13 +776,14 @@ class ObjectLayerItem(QGraphicsItem):
             # 旧调用只给矩形、没有对象身份：下一帧全量重建一次即可。
             self._index_dirty = True
         # 分块缓存：对象旧位置所在块要重画。新位置由下次 paint 生成新块。
-        if self._tile_cache:
-            for rect in rects:
-                self._invalidate_tiles_for_rect(rect)
-            if objects is not None:
-                for obj in objects:
-                    if obj is not None:
-                        self._invalidate_tiles_for_rect(object_rect(obj))
+        # 不能有 "if self._tile_cache" 守卫：异步下 cache 可能为空但已有在途
+        # 任务，此时仍需让它们的 epoch 失效，否则旧结果回来会画出对象旧位置。
+        for rect in rects:
+            self._invalidate_tiles_for_rect(rect)
+        if objects is not None:
+            for obj in objects:
+                if obj is not None:
+                    self._invalidate_tiles_for_rect(object_rect(obj))
         self._update_cache(rects)
 
     def _obj_bounds_of_rect(self, rect: QRectF) -> QRectF:
@@ -534,6 +800,7 @@ class ObjectLayerItem(QGraphicsItem):
         self._cache_dirty = True
         self._cb_rect = None       # 增删可能改变整体范围，下帧 _cache_bounds 重算
         self._tile_dirty_all = True  # 分块缓存同样失效
+        self._bump_tile_epoch()      # 作废所有在途建块
         self.update()
 
     # ---------------- 大量对象时的整层缓存 ----------------
@@ -600,6 +867,29 @@ class ObjectLayerItem(QGraphicsItem):
         return tuple((bx, by) for by in range(y0, y1 + 1)
                      for bx in range(x0, x1 + 1))
 
+    def _snapshot_tile_entries(self, bx: int, by: int, show_labels: bool,
+                               for_async: bool = False):
+        """GUI 线程：为一块生成不可变快照输入 (entries, images)。
+
+        for_async=False（同步路径）：直接引用原对象，images 留空，pure 函数
+            回退到 object_pixmap + drawPixmap，逐像素等同旧实现。
+        for_async=True（异步路径）：深拷贝对象 + 主线程 toImage() 注入位图，
+            工作线程只碰快照与 QImage，不接触任何 GUI 线程可变状态 / QPixmap。
+        """
+        rect = QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
+                      _TILE_CACHE, _TILE_CACHE)
+        rect = rect.adjusted(-32, -48, 32, 32)   # 标签/箭头溢出余量
+        entries = []
+        for obj in self._candidates(rect):
+            if getattr(obj, "visible", True):
+                b = self._obj_bounds(obj)
+                if b.intersects(rect):
+                    entries.append((_clone_for_render(obj) if for_async else obj, b))
+        images: dict = {}
+        if for_async:
+            _snapshot_pixmaps(self.doc, entries, images)
+        return entries, images
+
     def _tile_image(self, bx: int, by: int, lod: float,
                     show_labels: bool) -> QImage:
         """取（必要时生成）一块缓存。块内用补偿线宽，缩放后 alpha 与直接绘制一致。"""
@@ -614,25 +904,14 @@ class ObjectLayerItem(QGraphicsItem):
                 pass
             self._tile_lru.append(key)
             return img
-        # 生成/重建：按 lod 降分辨率，线宽按 1/lod 补偿。
-        # 例：lod=0.25 → 160px 图表示 640 场景单位，线宽 4px；drawImage 放大
-        # 4 倍后线宽回到 1 设备像素、alpha 190，与 cosmetic 直接绘制一致。
-        side = max(1, int(math.ceil(_TILE_CACHE * lod)))
-        if img is None or img.width() != side:
-            img = QImage(side, side, QImage.Format_ARGB32)
-        img.fill(Qt.transparent)
-        p = QPainter(img)
-        p.scale(lod, lod)
-        p.translate(-bx * _TILE_CACHE, -by * _TILE_CACHE)
-        line_w = max(1, int(math.ceil(1.0 / lod)))
-        rect = QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
-                      _TILE_CACHE, _TILE_CACHE)
-        rect = rect.adjusted(-32, -48, 32, 32)   # 标签/箭头溢出余量
-        for obj in self._candidates(rect):
-            if getattr(obj, "visible", True) and self._obj_bounds(obj).intersects(rect):
-                self._paint_object(p, obj, False, show_label=show_labels,
-                                   line_width=line_w)
-        p.end()
+        # 生成/重建经纯函数 build_tile_image：先快照候选对象，再画块。
+        # 线宽按 1/lod 补偿（例：lod=0.25 → 160px 图表示 640 场景单位、
+        # 线宽 4px），drawImage 放大 4 倍后回到 1 设备像素、alpha 190。
+        entries, images = self._snapshot_tile_entries(bx, by, show_labels)
+        job = TileBuildJob(key=key, lod=lod, bx=bx, by=by, doc=self.doc,
+                           entries=entries, images=images,
+                           show_labels=show_labels)
+        img = build_tile_image(job)
         self._tile_cache[key] = img
         self._tile_labels = show_labels
         if key not in self._tile_lru:
@@ -658,8 +937,10 @@ class ObjectLayerItem(QGraphicsItem):
                 QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
                        _TILE_CACHE, _TILE_CACHE),
                 img, QRectF(0, 0, img.width(), img.height()))
-        # 缓存块里烘焙的是未选中样式；选中态 / 预览 / 组框每帧单独覆盖。
-        sel_ids = self._sel_ids
+        self._paint_tile_overlays(painter, visible)
+
+    def _paint_tile_overlays(self, painter, visible: QRectF):
+        """缓存块里烘焙的是未选中样式；选中态 / 预览每帧单独覆盖。"""
         for obj in self.selected:
             if not getattr(obj, "visible", True):
                 continue
@@ -670,14 +951,86 @@ class ObjectLayerItem(QGraphicsItem):
             if visible.isEmpty() or self._obj_bounds(self.preview).intersects(visible):
                 self._paint_object(painter, self.preview, False, preview=True)
 
-    def _invalidate_tiles_for_rect(self, rect: QRectF):
-        """对象编辑后标脏覆盖范围涉及的块（所有 LOD 档）。"""
-        if not self._tile_cache:
+    # ---------------- 异步建块 ----------------
+    def _bump_tile_epoch(self):
+        """任何失效都递增代次并作废在途任务，防止旧结果回来画错。"""
+        self._tile_epoch += 1
+        self._tile_inflight.clear()
+
+    def _paint_tile_cache_async(self, painter, visible: QRectF, show_labels: bool):
+        """异步建块：命中块直接贴，未命中派发到线程池，仅贴已就绪的块。"""
+        if self._tile_dirty_all:
+            self._bump_tile_epoch()
+            self._tile_cache.clear()
+            self._tile_lru.clear()
+            self._tile_dirty_all = False
+        lod = _choose_tile_lod(self._scale)
+        if self._tile_bridge is None:
+            self._tile_bridge = _TileResultBridge(self)   # GUI 线程构造
+        dispatched = 0
+        for bx, by in self._tile_key_range(visible, lod):
+            key = (lod, bx, by)
+            rect = QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
+                          _TILE_CACHE, _TILE_CACHE)
+            img = self._tile_cache.get(key)
+            if img is not None and self._tile_labels == show_labels:
+                painter.drawImage(rect, img, QRectF(0, 0, img.width(), img.height()))
+                self._touch_tile_lru(key)
+                continue
+            # 未就绪：这一帧留空（渐进填充），下帧结果回来会 update 触发重绘。
+            self.update(rect)
+            if key in self._tile_inflight:
+                continue
+            if dispatched >= _TILE_MAX_JOBS_PER_FRAME:
+                continue
+            entries, images = self._snapshot_tile_entries(bx, by, show_labels,
+                                                          for_async=True)
+            job = TileBuildJob(
+                key=key, lod=lod, bx=bx, by=by, doc=self.doc,
+                entries=entries, images=images, show_labels=show_labels,
+                label_font=QFont(_LABEL_FONT), epoch=self._tile_epoch)
+            self._tile_inflight[key] = self._tile_epoch
+            _tile_pool().start(_TileBuildRunnable(self._tile_bridge, job))
+            dispatched += 1
+        self._paint_tile_overlays(painter, visible)
+
+    def _touch_tile_lru(self, key):
+        try:
+            self._tile_lru.remove(key)
+        except ValueError:
+            pass
+        self._tile_lru.append(key)
+
+    def _apply_tile_result(self, result: TileBuildResult):
+        """GUI 线程（由桥接信号投递）：写入就绪块，丢弃过期代次的结果。"""
+        self._tile_inflight.pop(result.key, None)
+        if result.epoch != self._tile_epoch:
             return
+        if result.image is None:
+            # 建块失败：仅清理在途登记，不写 cache；下一帧 paint 会重试该块。
+            lod, bx, by = result.key
+            self.update(QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
+                               _TILE_CACHE, _TILE_CACHE))
+            return
+        self._tile_cache[result.key] = result.image
+        self._tile_labels = result.show_labels
+        self._touch_tile_lru(result.key)
+        self._evict_tiles()
+        lod, bx, by = result.key
+        self.update(QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
+                           _TILE_CACHE, _TILE_CACHE))
+
+    def _invalidate_tiles_for_rect(self, rect: QRectF):
+        """对象编辑后标脏覆盖范围涉及的块（所有 LOD 档）。
+
+        异步下也要作废旧位置的在途任务：cache 可能还没生成，但在途结果
+        回来会画出对象移动前的画面。因此失效判定同时覆盖 cache 与 inflight。
+        """
         x0 = math.floor(rect.left() / _TILE_CACHE) - 1
         x1 = math.floor(rect.right() / _TILE_CACHE) + 1
         y0 = math.floor(rect.top() / _TILE_CACHE) - 1
         y1 = math.floor(rect.bottom() / _TILE_CACHE) + 1
+        touched = False
         for key in list(self._tile_cache):
             _lod, bx, by = key
             if x0 <= bx <= x1 and y0 <= by <= y1:
@@ -686,6 +1039,15 @@ class ObjectLayerItem(QGraphicsItem):
                     self._tile_lru.remove(key)
                 except ValueError:
                     pass
+                touched = True
+        # 在途任务：落在失效范围内的直接丢弃登记（结果回来时 epoch 已被 bump）。
+        for key in list(self._tile_inflight):
+            _lod, bx, by = key
+            if x0 <= bx <= x1 and y0 <= by <= y1:
+                self._tile_inflight.pop(key, None)
+                touched = True
+        if touched:
+            self._bump_tile_epoch()
 
     def _update_cache(self, rects):
         """对象移动 / 编辑后只重画受影响的那一小块缓存。"""
@@ -752,7 +1114,13 @@ class ObjectLayerItem(QGraphicsItem):
 
         # 超大场景（对象跨度超过单图像素上限）：分块 LOD 缓存。
         if self._use_tile_cache():
-            self._paint_tile_cache(painter, visible, show_labels)
+            async_on = self._async_tiles_override
+            if async_on is None:
+                async_on = _ASYNC_TILES and self.scene() is not None
+            if async_on:
+                self._paint_tile_cache_async(painter, visible, show_labels)
+            else:
+                self._paint_tile_cache(painter, visible, show_labels)
             self._paint_group_frames(painter, group_boxes)
             self._paint_group_labels(painter, group_boxes, show_labels)
             return
@@ -816,81 +1184,7 @@ class ObjectLayerItem(QGraphicsItem):
 
     def _paint_object(self, painter, obj, is_selected: bool, preview: bool = False,
                       show_label: bool = True, line_width: int | None = None):
-        rect = object_rect(obj, self.doc.tile_w, self.doc.tile_h)
-        # 对象框恒为黄色：选中不再改成蓝色，也不额外加一层边框线。
-        if line_width is not None and line_width > 1:
-            # 分块缓存块内：线宽按 1/lod 补偿，保证缩放后回到 1 设备像素、
-            # alpha 不随缩放稀释（见 _tile_image 注释）。
-            base = QColor(255, 200, 60, 190)
-            pen = QPen(base, line_width)
-            painter.setPen(pen)
-        else:
-            painter.setPen(_PEN_PREVIEW if preview else
-                           (_PEN_SELECTED if is_selected else _PEN_NORMAL))
-        painter.setBrush(Qt.NoBrush)
-
-        shape = obj.shape
-        if shape == "ellipse":
-            painter.drawEllipse(rect)
-        elif shape == "point":
-            center = QPointF(obj.x, obj.y)
-            painter.drawEllipse(center, 6.0, 6.0)
-            painter.drawLine(center + QPointF(-10, 0), center + QPointF(10, 0))
-            painter.drawLine(center + QPointF(0, -10), center + QPointF(0, 10))
-        elif shape in ("polygon", "polyline"):
-            poly = QPolygonF([QPointF(obj.x + px, obj.y + py)
-                              for px, py in obj.points])
-            if shape == "polygon":
-                painter.setBrush(QBrush(QColor(255, 200, 60, 30)))
-                painter.drawPolygon(poly)
-                painter.setBrush(Qt.NoBrush)
-            else:
-                painter.drawPolyline(poly)
-        elif shape in ("tile", "image"):
-            pix = object_pixmap(self.doc, obj)
-            if pix is not None:
-                painter.drawPixmap(rect, pix, QRectF(pix.rect()))
-            else:
-                painter.drawRect(rect)
-                painter.drawText(rect, Qt.AlignCenter, "图片缺失")
-        elif shape == "text":
-            style = obj.text_attr
-            painter.fillRect(rect, QColor(255, 248, 205, 210))
-            painter.drawRect(rect)
-            font = QFont(style["fontfamily"])
-            try:
-                font.setPixelSize(max(1, int(float(style["pixelsize"]))))
-            except (ValueError, TypeError):
-                font.setPixelSize(16)
-            font.setBold(style["bold"] in ("1", "true", "True"))
-            font.setItalic(style["italic"] in ("1", "true", "True"))
-            font.setUnderline(style["underline"] in ("1", "true", "True"))
-            font.setStrikeOut(style["strikeout"] in ("1", "true", "True"))
-            painter.setFont(font)
-            color = QColor(style["color"])
-            if not color.isValid():
-                color = QColor("#000000")
-            painter.setPen(color)
-            flags = (_HALIGN.get(style["halign"], Qt.AlignLeft)
-                     | _VALIGN.get(style["valign"], Qt.AlignTop))
-            if style["wrap"] in ("1", "true", "True"):
-                flags |= Qt.TextWordWrap
-            painter.drawText(rect.adjusted(2, 1, -2, -1), flags, obj.text)
-        else:  # rect
-            painter.drawRect(rect)
-
-        # 选中态不再画 8 个黄色缩放箭头（对象框本身即黄色）；整体选中范围由
-        # MapScene 的「选中包围框」统一表达（含所有选中对象，无缩放手柄）。
-
-        if is_selected and self.show_nodes and shape in ("polygon", "polyline"):
-            painter.setPen(QPen(QColor(255, 200, 60, 255), 1))
-            painter.setBrush(QBrush(QColor(90, 70, 20, 230)))
-            for px, py in obj.points:
-                painter.drawRect(QRectF(obj.x + px - 3, obj.y + py - 3, 6, 6))
-            painter.setBrush(Qt.NoBrush)
-
-        # 名称标签：只画有名字 / 类型的对象，避免画布上出现 "#12" 这类编号。
-        if show_label and not preview and (obj.name or obj.type_):
-            painter.setPen(_LABEL_YELLOW)
-            painter.setFont(_LABEL_FONT)
-            painter.drawText(QPointF(rect.x(), rect.y() - 4), obj.label)
+        """实例薄包装：委托给纯函数 _paint_object_pure，保持其他绘制路径不变。"""
+        _paint_object_pure(painter, obj, self.doc, is_selected=is_selected,
+                           preview=preview, show_label=show_label,
+                           line_width=line_width, show_nodes=self.show_nodes)
