@@ -116,14 +116,33 @@ class ObjectMarqueeTest(unittest.TestCase):
         self.assertIn(id(self.objs[0]), got)
         self.assertIn(id(self.objs[1]), got)
         self.assertNotIn(id(self.objs[2]), got)
-        # 蓝色选框在松手后撤掉。
+        # 框到多个对象：选框刚好包住所有对象（A∪B∪D 的外接矩形）。
+        self.assertIsNotNone(self.w._sel_rect)
+        self.assertEqual(tuple(round(v, 3) for v in self.w._sel_rect),
+                         (100.0, 100.0, 240.0, 240.0))
+
+    def test_marquee_does_not_select_tiles(self):
+        # 用户要求：对象层拖框只选对象，绝不选中瓦片。
+        self._marquee(80.0, 80.0, 260.0, 260.0)
+        self.assertIsNone(self.w._tile_selection)
+        # 框到多个对象时选框保留（贴合对象外接矩形）。
+        self.assertIsNotNone(self.w._sel_rect)
+
+    def test_marquee_single_object_hides_rect(self):
+        # 只框到一个对象：蓝色虚线选框消失。
+        self._marquee(90.0, 90.0, 120.0, 120.0)  # 只碰 A 的左上角，避开 point D(150,150)
+        self.assertEqual(len(self.w.scene.selected_objects), 1)
         self.assertIsNone(self.w._sel_rect)
         self.assertFalse(self.w.scene._selection_item.isVisible()
                          if self.w.scene._selection_item is not None else False)
 
-    def test_marquee_does_not_touch_tile_selection(self):
-        self._marquee(80.0, 80.0, 260.0, 260.0)
-        self.assertIsNone(self.w._tile_selection)  # 对象层框选不写入瓦片选区
+    def test_marquee_empty_hides_rect(self):
+        # 一个都没框到：蓝色虚线选框同样消失。
+        self._marquee(800.0, 800.0, 900.0, 900.0)
+        self.assertEqual(list(self.w.scene.selected_objects), [])
+        self.assertIsNone(self.w._sel_rect)
+        self.assertFalse(self.w.scene._selection_item.isVisible()
+                         if self.w.scene._selection_item is not None else False)
 
     def test_marquee_click_selects_single_object(self):
         # 极小拖拽视为点击：选中指针下的对象。
@@ -136,6 +155,116 @@ class ObjectMarqueeTest(unittest.TestCase):
         selected = list(w.scene.selected_objects)
         self.assertEqual(len(selected), 1)
         self.assertIs(selected[0], self.objs[0])  # A 在 (100,100,40,40) 内
+
+
+def _build_multi_layer_doc():
+    """两个对象层 + 一个瓦片层，用于验证跨层选择。"""
+    doc, tile, obj_layer, objs = _build_doc()
+    units = ObjectLayer(name="Units", objects=[
+        MapObject(object_id=10, name="U1", shape="rect",
+                  x=120, y=120, width=30, height=30),
+        MapObject(object_id=11, name="U2", shape="rect",
+                  x=400, y=400, width=30, height=30),
+    ])
+    hidden = ObjectLayer(name="Hidden", visible=False, objects=[
+        MapObject(object_id=20, name="H1", shape="rect",
+                  x=130, y=130, width=30, height=30),
+    ])
+    doc.layers.extend([units, hidden])
+    return doc, tile, obj_layer, objs, units, hidden
+
+
+def _build_multi_window():
+    app = QApplication.instance() or QApplication([])
+    from rwmap.app.main_window import MainWindow
+    w = MainWindow(auto_open=False)
+    doc, tile, obj_layer, objs, units, hidden = _build_multi_layer_doc()
+    w.state.doc = doc
+    w.state.current_layer = tile
+    w.scene.doc = doc
+    w.scene.set_document(doc)
+    w.state.profile.write_enabled = True
+    w._tile_selection = None
+    w._tile_clipboard = None
+    w._sel_rect = None
+    w._sel_dragging = False
+    w._sel_moving = False
+    w._obj_marquee = False
+    w._active_layer = tile
+    w._set_object_tool("select")
+    return w, tile, obj_layer, objs, units, hidden
+
+
+class CrossLayerSelectionTest(unittest.TestCase):
+    """选择 / 框选不受当前激活层限制（2026-11-21 用户反馈）。"""
+
+    def setUp(self):
+        (self.w, self.tile, self.triggers, self.objs,
+         self.units, self.hidden) = _build_multi_window()
+
+    def test_tile_layer_marquee_ignores_objects(self):
+        # 在 Ground（瓦片层）拖框：对象对鼠标透明，框内对象一个都不选。
+        w = self.w
+        w._on_layer_selected(self.tile)
+        w.view.objectToolPressed.emit(80.0, 80.0)
+        w.view.objectToolMoved.emit(180.0, 180.0)
+        w.view.objectToolReleased.emit(180.0, 180.0)
+        self.assertEqual(list(w.scene.selected_objects), [])
+
+    def test_tile_layer_marquee_keeps_tile_selection(self):
+        # Ground 层拖框只框瓦片：瓦片选区保留（Ctrl+C 复制瓦片不丢）。
+        w = self.w
+        w._on_layer_selected(self.tile)
+        w.view.objectToolPressed.emit(80.0, 80.0)
+        w.view.objectToolMoved.emit(180.0, 180.0)
+        w.view.objectToolReleased.emit(180.0, 180.0)
+        self.assertIsNotNone(w._tile_selection)
+
+    def test_object_layer_marquee_selects_all_object_layers(self):
+        # 在 Triggers（对象层）拖框：Units 层对象也要被选中。
+        w = self.w
+        w._on_layer_selected(self.triggers)
+        w.view.objectToolPressed.emit(80.0, 80.0)
+        w.view.objectToolMoved.emit(180.0, 180.0)
+        w.view.objectToolReleased.emit(180.0, 180.0)
+        names = {o.name for o in w.scene.selected_objects}
+        self.assertIn("A", names)
+        self.assertIn("U1", names)
+        self.assertNotIn("H1", names)
+
+    def test_click_on_tile_layer_ignores_object_from_other_layer(self):
+        # 用户要求：Ground（瓦片层）对象透明，点 Units 层对象也选不中。
+        w = self.w
+        w._on_layer_selected(self.tile)
+        w.view.objectToolPressed.emit(130.0, 130.0)
+        w.view.objectToolReleased.emit(130.0, 130.0)
+        self.assertEqual(list(w.scene.selected_objects), [])
+
+    def test_click_on_tile_layer_ignores_triggers_object(self):
+        # 用户场景：Ground 层单击 Triggers 对象（map_info 那类）不选不拖。
+        w = self.w
+        w._on_layer_selected(self.tile)
+        w.view.objectToolPressed.emit(105.0, 105.0)   # Triggers 的 A(100,100,40,40) 独有区
+        w.view.objectToolReleased.emit(105.0, 105.0)
+        self.assertEqual(list(w.scene.selected_objects), [])
+        # 拖动也不该移动对象。
+        a = self.objs[0]
+        before = (a.x, a.y)
+        w.view.objectToolPressed.emit(105.0, 105.0)
+        w.view.objectToolMoved.emit(135.0, 130.0)
+        w.view.objectToolReleased.emit(135.0, 130.0)
+        self.assertEqual((a.x, a.y), before)
+
+    def test_object_layer_marquee_does_not_select_tiles(self):
+        # 用户要求：对象层拖框只选对象，不选 Ground 瓦片。
+        w = self.w
+        w._on_layer_selected(self.triggers)
+        w.view.objectToolPressed.emit(10.0, 10.0)
+        w.view.objectToolMoved.emit(160.0, 160.0)
+        w.view.objectToolReleased.emit(160.0, 160.0)
+        self.assertIsNone(w._tile_selection)
+        # 框到多个对象 → 选框贴合对象外接矩形（不吸附格线）。
+        self.assertIsNotNone(w._sel_rect)
 
 
 if __name__ == "__main__":

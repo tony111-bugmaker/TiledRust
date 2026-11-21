@@ -41,6 +41,11 @@ from ..theme import ASH, INK, TEXT, TEXT_DIM, WIN11_BLUE
 
 _BG = QColor(INK)
 _GRID = QColor(ASH)
+# 瓦片分界线：旧版用 ASH(#2a2e34) 画在深绿/深红图集上几乎看不见，
+# 换成半透明浅灰，两种底色的图集都能看清；保留 _GRID 供主题检查用。
+_GRID_TILE = QColor(216, 216, 216, 128)
+# 间距/边距空隙的提示底色（只压暗一点点，不盖住图集内容）。
+_GRID_GAP = QColor(216, 216, 216, 26)
 
 # 单选按钮的选中圆球用 Windows 11 默认强调蓝；复选框仍是双色灰阶。
 _RADIO_CHECKED_STYLE = (
@@ -190,13 +195,24 @@ class TilesetAtlasView(QWidget):
         return native_y
 
     def _col_x(self, c: int) -> int:
-        """第 c 条竖直网格线的屏幕 x（即瓦片左边界）。"""
+        """第 c 块瓦片的左边界屏幕 x（= 边距 + c×(瓦片宽+间距)）。"""
         step = self._tile_w + self._spacing
         return int(round(self._nx(self._margin + c * step)))
 
     def _row_y(self, r: int) -> int:
+        """第 r 块瓦片的上边界屏幕 y（= 边距 + r×(瓦片高+间距)）。"""
         step = self._tile_h + self._spacing
         return int(round(self._ny(self._margin + r * step)))
+
+    def _col_right(self, c: int) -> int:
+        """第 c 块瓦片的右边界屏幕 x（左边界 + 一个瓦片宽，不含间距）。"""
+        step = self._tile_w + self._spacing
+        return int(round(self._nx(self._margin + c * step + self._tile_w)))
+
+    def _row_bottom(self, r: int) -> int:
+        """第 r 块瓦片的下边界屏幕 y（上边界 + 一个瓦片高，不含间距）。"""
+        step = self._tile_h + self._spacing
+        return int(round(self._ny(self._margin + r * step + self._tile_h)))
 
     def _tile_at(self, pos):
         if self.ts is None or not self.columns or not self.rows:
@@ -222,7 +238,8 @@ class TilesetAtlasView(QWidget):
         r = local_id // self.columns
         x0 = self._col_x(c)
         y0 = self._row_y(r)
-        return (x0, y0, self._col_x(c + 1) - x0, self._row_y(r + 1) - y0)
+        # 选中框只框瓦片本身（左..右 / 上..下），不含后面的间距空隙。
+        return (x0, y0, self._col_right(c) - x0, self._row_bottom(r) - y0)
 
     # ---------------- 绘制 ----------------
     def paintEvent(self, event):
@@ -234,15 +251,36 @@ class TilesetAtlasView(QWidget):
             painter.setRenderHint(QPainter.SmoothPixmapTransform, self._zoom < 1)
             painter.drawPixmap(0, 0, self.atlas_w, self.atlas_h, self._pix)
         if self._pix is not None and self.atlas_w and self.atlas_h:
-            # 瓦片网格：按与图集图完全一致的缩放位置画线，避免整数累积漂移
-            # 导致高倍放大时网格与瓦片错位（这是边界显示偶尔出问题的根因）。
-            painter.setPen(QPen(_GRID, 1))
-            for c in range(self.columns + 1):
-                x = self._col_x(c)
-                painter.drawLine(x, 0, x, self.atlas_h)
-            for r in range(self.rows + 1):
-                y = self._row_y(r)
-                painter.drawLine(0, y, self.atlas_w, y)
+            # 瓦片分界线：把「瓦片本体」和「间距/边距空隙」分开画。
+            #
+            # 旧版每格只画一条线，落在 margin + c×(tile+spacing)（即每块左边界），
+            # 于是 20px 瓦片连同后面的 1px 间距被当成同一个 21px 格子，间距那条
+            # 空隙完全没被表示出来——看起来就像「分界线没算间距和边距」。
+            # 现在：边距带 + 每块瓦片的左右/上下边界 + 间距带，都按 native 坐标
+            # 经 _nx/_ny 映射，保证与图片缩放位置一致、高倍放大不漂移。
+            # ① 边距带（图片边缘 → 第一块瓦片）和间距带（每块瓦片之间）淡色提示
+            if self._margin_x > 0:
+                painter.fillRect(0, 0, self._margin_x, self.atlas_h, _GRID_GAP)
+                painter.fillRect(0, 0, self.atlas_w, self._margin_y, _GRID_GAP)
+            if self._spacing > 0:
+                for c in range(self.columns):
+                    x0, x1 = self._col_right(c), self._col_x(c + 1)
+                    if x1 > x0:
+                        painter.fillRect(x0, 0, x1 - x0, self.atlas_h, _GRID_GAP)
+                for r in range(self.rows):
+                    y0, y1 = self._row_bottom(r), self._row_y(r + 1)
+                    if y1 > y0:
+                        painter.fillRect(0, y0, self.atlas_w, y1 - y0, _GRID_GAP)
+            # ② 每块瓦片本体四边：左/右、上/下边界各一条
+            painter.setPen(QPen(_GRID_TILE, 1))
+            for c in range(self.columns):
+                xl, xr = self._col_x(c), self._col_right(c)
+                painter.drawLine(xl, 0, xl, self.atlas_h)
+                painter.drawLine(xr, 0, xr, self.atlas_h)
+            for r in range(self.rows):
+                yt, yb = self._row_y(r), self._row_bottom(r)
+                painter.drawLine(0, yt, self.atlas_w, yt)
+                painter.drawLine(0, yb, self.atlas_w, yb)
         # 仅显示「已点击选中」的瓦片（蓝色填充 + 蓝边）；不再画「鼠标悬停」的
         # 浅蓝预览框（用户要求去掉悬停蓝框）。
         if self.selected >= 0:

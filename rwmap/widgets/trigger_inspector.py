@@ -909,6 +909,14 @@ class TriggerInspector(QWidget):
         if not new_type or new_type == old_type:
             return
         before_props = dict(self.obj.properties.values)
+        # 类型切换只能重建「类型相关属性」；编辑器私有属性（分组 / 节点位置）
+        # 必须原样保住，否则切一次类型分组就没了，节点图布局也会丢。
+        hidden_before = {
+            k: (before_props[k],
+                self.obj.properties.types.get(k),
+                k in self.obj.properties.text_props)
+            for k in HIDDEN_EDITOR_PROPERTIES if k in before_props
+        }
         keep = {"id", *HIDDEN_EDITOR_PROPERTIES, *type_props(new_type)}
         removed = [k for k in before_props if k not in keep]
         filled = [k for k in removed if before_props[k] != ""]
@@ -929,6 +937,10 @@ class TriggerInspector(QWidget):
             for k in type_props(new_type):
                 bag.set(k, before_props.get(k, ""))
             bag.set("id", before_props.get("id", ""))
+            for k, (value, typ, is_text) in hidden_before.items():
+                bag.set(k, value, typ)
+                if is_text:
+                    bag.text_props.add(k)
             o.type_ = new_type
             if not o.name or o.name in (old_type, type_label(old_type)):
                 o.name = type_label(new_type)

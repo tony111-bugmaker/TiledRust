@@ -9,7 +9,7 @@ import tempfile  # noqa: E402
 import unittest  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from rwmap.document.layer import ObjectLayer  # noqa: E402
+from rwmap.document.layer import ObjectLayer, TileLayer  # noqa: E402
 from rwmap.io.path_resolver import ResourceResolver  # noqa: E402
 from rwmap.io.tmx_reader import read_document  # noqa: E402
 from rwmap.io.tmx_writer import write_document  # noqa: E402
@@ -186,10 +186,23 @@ class ObjectEditUiTest(unittest.TestCase):
         w.state.undo_stack.undo()
         self.assertEqual(len(object_layers(w.state.doc)[0].objects), count)
 
-    def test_ctrl_click_selects_object_on_canvas(self):
+    def test_ctrl_click_on_tile_layer_ignores_object(self):
+        # 用户要求：Ground（瓦片层）对象透明，连 Ctrl+临时点选也不命中对象。
         w = self.w
+        self.assertIsInstance(w._active_layer, TileLayer)  # 示例图默认在 Ground
         layer = object_layers(w.state.doc)[0]
         obj = layer.objects[0]
+        x, y = obj.x + (obj.width or 20) / 2, obj.y + (obj.height or 20) / 2
+        w.view.objectPressed.emit(x, y)
+        self.assertIsNone(w.scene.selected_object)
+        w.view.objectReleased.emit(x, y)
+
+    def test_ctrl_click_selects_object_on_object_layer(self):
+        # 切到对象层后，Ctrl+临时点选对象仍正常。
+        w = self.w
+        obj_layer = object_layers(w.state.doc)[0]
+        w._on_layer_selected(obj_layer)
+        obj = obj_layer.objects[0]
         x, y = obj.x + (obj.width or 20) / 2, obj.y + (obj.height or 20) / 2
         w.view.objectPressed.emit(x, y)
         self.assertIs(w.scene.selected_object, obj)

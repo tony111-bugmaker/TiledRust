@@ -1,16 +1,27 @@
 """对象层绘制：Tiled 全形状 + 名称标签 + 8 个黄色缩放箭头 + 拖拽预览。
 
-对象数量很少（官方图 1~几十个），按对象逐个绘制即可；
-刷新仍走局部脏矩形，避免 hover 时带着整张地图重绘。
+对象层是「一层一个 QGraphicsItem」，Qt 的 BSP 索引只能剔除整层，
+帮不到层内对象。对象数量大时（实测 2000 个矩形 ~190ms/帧），瓶颈在
+「每帧线性遍历全部对象 + 逐对象构造 Pen/Font + 逐对象 drawText +
+图片对象每帧重新 transformed()」。这里按四层优化：
+
+1. 均匀网格空间索引：paint 只遍历与 exposedRect 相交的桶；
+2. 变形图片缓存：翻转/旋转后的 QPixmap 按 (路径, 翻转, 角度) 缓存；
+3. Pen / Font 提为模块常量，不再逐对象构造；
+4. 缩小到 0.5 倍以下自动隐藏名称标签（文字缩放后本就不可读）。
+
+刷新仍走局部脏矩形；对象移动时索引按对象增量更新，不逐帧全量重建。
 """
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF, QTransform,
+    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
+    QTransform,
 )
 from PySide6.QtWidgets import QGraphicsItem
 
@@ -21,6 +32,32 @@ from ..document.properties import EDITOR_GROUP_PROPERTY
 from ..tilesets.tile_cache import get_pixmap
 
 _IMAGE_CACHE: dict[str, QPixmap] = {}
+# 翻转 / 旋转后的图片：QPixmap.transformed(SmoothTransformation) 每帧重做
+# 会直接吃掉整帧预算（大图尤其明显），按变形参数缓存结果。
+_TRANSFORM_CACHE: dict[tuple, QPixmap] = {}
+_MAX_TRANSFORM_CACHE = 256
+
+# 空间索引桶大小（场景单位）。20px 格子约 12.8 格一桶；视口 800x600
+# 同倍率下只碰约十几个桶，而不是遍历全部对象。
+_GRID_CELL = 256.0
+_MAX_CELLS_PER_OBJECT = 64   # 超大对象放进 overflow，避免一张图占满所有桶
+
+# 缩到 0.5 倍以下文字不足 8px，画出来只是一团糊且 drawText 很贵。
+_LABEL_MIN_SCALE = 0.5
+
+# 大量对象时的整层缓存：对象增删不频繁、逐帧全量重绘却很贵。
+# 小场景 (<200) 保持逐对象路径，避免缓存维护成本盖过收益。
+_CACHE_MIN_OBJECTS = 200
+_CACHE_MAX_SIDE = 4096
+
+# 超大场景（对象分布跨度 > _CACHE_MAX_SIDE，例如真实 330x265 图跨度达
+# 1.4 万像素）走分块 LOD 缓存：整层一张图会超像素上限而建不起来，退化为
+# 每帧逐对象绘制（实测缩放 0.25 时 208ms/帧）。分块后只渲染视口相交的块，
+# 缓存命中帧降到 ~5ms。
+_TILE_CACHE = 640.0                    # 每块场景边长
+_TILE_CACHE_MAX = 256                  # 块缓存上限（LRU 淘汰）
+_TILE_LODS = (1.0, 0.5, 0.25, 0.125)   # 与瓦片层 LOD 档位一致
+_TILE_CACHE_MIN_SPAN = 4200.0          # 跨度超此值才启用分块（单图上限 4096）
 
 _HALIGN = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
            "right": Qt.AlignRight, "justify": Qt.AlignJustify}
@@ -33,6 +70,28 @@ def object_rect(obj, tile_w: int = 20, tile_h: int = 20) -> QRectF:
     return QRectF(x, y, w, h)
 
 
+def _cells_for(rect: QRectF) -> tuple[tuple[int, int], ...]:
+    """矩形覆盖的网格桶坐标（含标签 / 箭头留白后传入）。"""
+    if rect.isEmpty():
+        return ()
+    gx0 = math.floor(rect.left() / _GRID_CELL)
+    gx1 = math.floor(rect.right() / _GRID_CELL)
+    gy0 = math.floor(rect.top() / _GRID_CELL)
+    gy1 = math.floor(rect.bottom() / _GRID_CELL)
+    return tuple((gx, gy) for gy in range(gy0, gy1 + 1)
+                 for gx in range(gx0, gx1 + 1))
+
+
+def _choose_tile_lod(scale: float) -> float:
+    """按视图缩放选缓存 LOD 档位；缩得越小缓存分辨率越低（省内存、建块快）。"""
+    budget = max(abs(scale) or 1.0, 0.02)
+    for lod in _TILE_LODS:
+        if lod <= budget:
+            return lod
+    return _TILE_LODS[-1]
+
+
+@lru_cache(maxsize=256)
 def group_color(name: str) -> QColor:
     """按组名稳定哈希出一个明显区别于对象黄（255,200,60）的颜色。"""
     h = 0
@@ -45,6 +104,19 @@ def group_color(name: str) -> QColor:
 # 对象轮廓本来就是黄色；选中时既不变蓝也不加边框线，只多出 8 个同色箭头。
 OBJECT_YELLOW = QColor(255, 200, 60, 255)
 _LABEL_YELLOW = QColor(255, 235, 160, 230)
+
+# 绘制状态常量：paint 里逐对象 setPen/setFont 构造临时对象是明确热点。
+# cosmetic 笔宽恒为 1 设备像素：过去 width=1 是「场景坐标 1 单位」，视图缩到
+# 0.5/0.25 时线宽摊成 0.5/0.25 设备像素，抗锯齿把 alpha 190 一路稀释到 95/47，
+# 用户看到「缩小后线变透明」。cosmetic 让线宽不随缩放变化，各倍率下 alpha 恒定。
+_PEN_NORMAL = QPen(QColor(255, 200, 60, 190), 1)
+_PEN_SELECTED = QPen(QColor(255, 200, 60, 255), 1)
+_PEN_PREVIEW = QPen(QColor(255, 200, 60, 210), 2, Qt.DashLine)
+for _pen in (_PEN_NORMAL, _PEN_SELECTED, _PEN_PREVIEW):
+    _pen.setCosmetic(True)
+_LABEL_FONT = QFont()
+_GROUP_FONT = QFont()
+_GROUP_FONT.setBold(True)
 
 # 纯黄色双向箭头，屏幕固定尺寸；放大到第九轮 9px 的 1.5 倍。
 HANDLE_NAMES = ("nw", "n", "ne", "e", "se", "s", "sw", "w")
@@ -201,23 +273,31 @@ def object_pixmap(doc, obj) -> QPixmap | None:
         flip_v = getattr(obj, "image_flip_v", False)
         rotation = getattr(obj, "rotation", 0.0) or 0.0
         if flip_h or flip_v or rotation:
-            cx, cy = pix.width() / 2.0, pix.height() / 2.0
-            tx = QTransform()
-            tx.translate(cx, cy)
-            if rotation:
-                tx.rotate(rotation)
-            if flip_h:
-                tx.scale(-1, 1)
-            if flip_v:
-                tx.scale(1, -1)
-            tx.translate(-cx, -cy)
-            pix = pix.transformed(tx, Qt.SmoothTransformation)
+            tkey = (key, bool(flip_h), bool(flip_v), rotation)
+            cached = _TRANSFORM_CACHE.get(tkey)
+            if cached is None:
+                cx, cy = pix.width() / 2.0, pix.height() / 2.0
+                tx = QTransform()
+                tx.translate(cx, cy)
+                if rotation:
+                    tx.rotate(rotation)
+                if flip_h:
+                    tx.scale(-1, 1)
+                if flip_v:
+                    tx.scale(1, -1)
+                tx.translate(-cx, -cy)
+                cached = pix.transformed(tx, Qt.SmoothTransformation)
+                if len(_TRANSFORM_CACHE) >= _MAX_TRANSFORM_CACHE:
+                    _TRANSFORM_CACHE.clear()
+                _TRANSFORM_CACHE[tkey] = cached
+            return cached
         return pix
     return None
 
 
 def clear_image_cache() -> None:
     _IMAGE_CACHE.clear()
+    _TRANSFORM_CACHE.clear()
 
 
 class ObjectLayerItem(QGraphicsItem):
@@ -232,6 +312,27 @@ class ObjectLayerItem(QGraphicsItem):
         self.show_names = True         # 「视图 → 显示对象名称」；默认保持历史行为
         self._scale = 1.0             # 最近一次绘制的视图缩放，脏矩形按它换算
         self._content_rect = None      # 缓存的包围盒（覆盖所有对象 + 地图，含地图外）
+        # 层内空间索引：Qt 的 BSP 只能剔除整层，层内几千对象要自己分桶。
+        self._grid: dict[tuple[int, int], list] = {}
+        self._obj_cells: dict[int, tuple] = {}
+        self._overflow: list = []       # 跨桶过多的大对象，每次查询都带上
+        self._index_dirty = True
+        # 大量对象时的整层场景坐标缓存（只含未选中对象，选中态单独覆盖）。
+        self._obj_cache: QImage | None = None   # QImage 非预乘，避免文字边缘偏色
+        self._cache_rect = QRectF()
+        self._cache_dirty = False
+        self._cache_labels = True
+        # _cache_bounds() 要遍历全部对象做 united；这张真实图有 5500+ 对象、
+        # 坐标跨度 1.4 万像素，每帧重算要 12ms 且结果几乎不变。缓存起来，
+        # 只在增删（refresh_all）时失效，移动（refresh_rects）时只扩张。
+        self._cb_rect: QRectF | None = None
+        # 超大场景的分块 LOD 缓存：{(lod, bx, by): QImage}。每块是场景坐标
+        # 固定网格，缩放只切 LOD 档，平移复用已有块。
+        self._tile_cache: dict = {}
+        self._tile_lru: list = []          # 最近使用的 key，超限淘汰
+        self._tile_labels: bool = True     # 缓存块里是否烘焙了标签
+        self._tile_dirty_all: bool = False # 增删后置位，下帧清空重建
+        self._tile_span: float | None = None
         self.setZValue(z_value)
         self.setOpacity(layer.opacity)
         self.setVisible(layer.visible)
@@ -257,6 +358,58 @@ class ObjectLayerItem(QGraphicsItem):
         if self.preview is not None:
             rect = rect.united(self._obj_bounds(self.preview))
         self._content_rect = rect
+
+    # ---------------- 层内空间索引 ----------------
+    def _rebuild_index(self):
+        """全量分桶（仅在对象增删 / refresh_all 时调用，拖动走增量）。"""
+        self._grid.clear()
+        self._obj_cells.clear()
+        self._overflow = []
+        self._obj_order = {id(o): i for i, o in enumerate(self.layer.objects)}
+        for obj in self.layer.objects:
+            cells = _cells_for(self._obj_bounds(obj))
+            if len(cells) > _MAX_CELLS_PER_OBJECT:
+                self._overflow.append(obj)
+                continue
+            self._obj_cells[id(obj)] = cells
+            for cell in cells:
+                self._grid.setdefault(cell, []).append(obj)
+        self._index_dirty = False
+
+    def _move_in_index(self, obj, rect):
+        """对象位置改变后只挪它自己占用的桶，不逐帧重建整张索引。"""
+        oid = id(obj)
+        old = self._obj_cells.pop(oid, ())
+        for cell in old:
+            bucket = self._grid.get(cell)
+            if bucket is not None:
+                bucket[:] = [o for o in bucket if id(o) != oid]
+        # 注意 MapObject 是 dataclass（== 按字段比较），去重必须按身份。
+        self._overflow = [o for o in self._overflow if id(o) != oid]
+        cells = _cells_for(self._obj_bounds_of_rect(rect))
+        if len(cells) > _MAX_CELLS_PER_OBJECT:
+            self._overflow.append(obj)
+            return
+        self._obj_cells[oid] = cells
+        for cell in cells:
+            self._grid.setdefault(cell, []).append(obj)
+
+    def _candidates(self, visible: QRectF) -> list:
+        """只返回与视口相交的对象；顺序按 layer.objects 保持遮挡关系。"""
+        if visible.isEmpty():
+            return list(self.layer.objects)
+        found = {}
+        for cell in _cells_for(visible):
+            for obj in self._grid.get(cell, ()):
+                found[id(obj)] = obj
+        for obj in self._overflow:
+            found[id(obj)] = obj
+        order = getattr(self, "_obj_order", None)
+        if not order:
+            return list(found.values())
+        fallback = len(self.layer.objects)
+        return sorted(found.values(),
+                      key=lambda o: order.get(id(o), fallback))
 
     def boundingRect(self) -> QRectF:
         if self._content_rect is None or self._content_rect.isEmpty():
@@ -329,9 +482,11 @@ class ObjectLayerItem(QGraphicsItem):
         if self.show_names == value:
             return
         self.show_names = value
+        self._cache_dirty = True   # 缓存里烘焙了标签，开关切换要重建
+        self._tile_dirty_all = True
         self.update(self.boundingRect())
 
-    def refresh_rects(self, rects):
+    def refresh_rects(self, rects, objects=None):
         # 对象移动：位置变化会使包围盒改变，先令索引失效再扩张（只增不减，安全，
         # 不会因缩放/平移把层错剔）。
         self.prepareGeometryChange()
@@ -339,8 +494,31 @@ class ObjectLayerItem(QGraphicsItem):
             for rect in rects:
                 self._content_rect = self._content_rect.united(
                     self._obj_bounds_of_rect(rect))
+        if self._cb_rect is not None:
+            for rect in rects:
+                self._cb_rect = self._cb_rect.united(
+                    rect.adjusted(-24, -24, 24, 24))
         for rect in rects:
             self.update(self._dirty_rect(rect))
+        # 空间索引按对象增量更新：拖动每帧只挪几个桶，不遍历全层。
+        if objects is not None and len(objects) == len(rects):
+            if self._index_dirty:
+                self._rebuild_index()
+            for rect, obj in zip(rects, objects):
+                if obj is not None:   # extra_rects 只标脏，没有对应对象
+                    self._move_in_index(obj, rect)
+        else:
+            # 旧调用只给矩形、没有对象身份：下一帧全量重建一次即可。
+            self._index_dirty = True
+        # 分块缓存：对象旧位置所在块要重画。新位置由下次 paint 生成新块。
+        if self._tile_cache:
+            for rect in rects:
+                self._invalidate_tiles_for_rect(rect)
+            if objects is not None:
+                for obj in objects:
+                    if obj is not None:
+                        self._invalidate_tiles_for_rect(object_rect(obj))
+        self._update_cache(rects)
 
     def _obj_bounds_of_rect(self, rect: QRectF) -> QRectF:
         """给定对象矩形（已是场景坐标矩形），返回带标签/箭头留白的绘制范围。"""
@@ -352,7 +530,188 @@ class ObjectLayerItem(QGraphicsItem):
         # 索引丢弃旧包围盒、用新值重新索引，避免视图按旧范围把层剔除。
         self.prepareGeometryChange()
         self._recompute_content_rect()
+        self._index_dirty = True   # 增删后桶内容全变，下帧 paint 前重建
+        self._cache_dirty = True
+        self._cb_rect = None       # 增删可能改变整体范围，下帧 _cache_bounds 重算
+        self._tile_dirty_all = True  # 分块缓存同样失效
         self.update()
+
+    # ---------------- 大量对象时的整层缓存 ----------------
+    # 只缓存「未选中对象」的场景坐标位图；选中态 / 预览 / 组框每帧单独画。
+    # 小场景不走这条路，避免大 QPixmap 和维护成本。
+    def _cache_bounds(self) -> QRectF:
+        if self._cb_rect is not None:
+            return self._cb_rect
+        tw, th = self.doc.tile_w, self.doc.tile_h
+        rect = QRectF(0, 0, tw * self.doc.width, th * self.doc.height)
+        for obj in self.layer.objects:
+            if getattr(obj, "visible", True):
+                rect = rect.united(
+                    object_rect(obj, tw, th).adjusted(-24, -24, 24, 24))
+        self._cb_rect = rect
+        return rect
+
+    def _ensure_cache(self, show_labels: bool) -> QImage | None:
+        if len(self.layer.objects) < _CACHE_MIN_OBJECTS or self._scale > 1.0:
+            self._obj_cache = None
+            return None
+        cache = self._obj_cache
+        if cache is not None and not self._cache_dirty \
+                and self._cache_labels == show_labels:
+            return cache
+        rect = self._cache_bounds()
+        w, h = max(1, math.ceil(rect.width())), max(1, math.ceil(rect.height()))
+        if w > _CACHE_MAX_SIDE or h > _CACHE_MAX_SIDE:
+            self._obj_cache = None
+            return None
+        if cache is None or cache.width() != w or cache.height() != h:
+            cache = QImage(w, h, QImage.Format_ARGB32)
+        cache.fill(Qt.transparent)
+        p = QPainter(cache)
+        p.translate(-rect.left(), -rect.top())
+        for obj in self.layer.objects:
+            if getattr(obj, "visible", True):
+                self._paint_object(p, obj, False, show_label=show_labels)
+        p.end()
+        self._obj_cache = cache
+        self._cache_rect = rect
+        self._cache_dirty = False
+        self._cache_labels = show_labels
+        return cache
+
+    # ---------------- 超大场景分块 LOD 缓存 ----------------
+    def _use_tile_cache(self) -> bool:
+        """对象量大且整体跨度超过单图像素上限时启用分块缓存。"""
+        if len(self.layer.objects) < _CACHE_MIN_OBJECTS or self._scale > 1.0:
+            return False
+        if self._tile_span is None:
+            b = self._cache_bounds()
+            self._tile_span = max(b.width(), b.height())
+        return self._tile_span > _TILE_CACHE_MIN_SPAN
+
+    def _tile_key_range(self, visible: QRectF, lod: float):
+        """视口（场景坐标）覆盖的块索引 (bx, by)。"""
+        if visible.isEmpty():
+            return ()
+        x0 = math.floor(visible.left() / _TILE_CACHE)
+        x1 = math.floor(visible.right() / _TILE_CACHE)
+        y0 = math.floor(visible.top() / _TILE_CACHE)
+        y1 = math.floor(visible.bottom() / _TILE_CACHE)
+        return tuple((bx, by) for by in range(y0, y1 + 1)
+                     for bx in range(x0, x1 + 1))
+
+    def _tile_image(self, bx: int, by: int, lod: float,
+                    show_labels: bool) -> QImage:
+        """取（必要时生成）一块缓存。块内用补偿线宽，缩放后 alpha 与直接绘制一致。"""
+        key = (lod, bx, by)
+        img = self._tile_cache.get(key)
+        if img is not None and not self._tile_dirty_all \
+                and self._tile_labels == show_labels:
+            # 命中：更新 LRU
+            try:
+                self._tile_lru.remove(key)
+            except ValueError:
+                pass
+            self._tile_lru.append(key)
+            return img
+        # 生成/重建：按 lod 降分辨率，线宽按 1/lod 补偿。
+        # 例：lod=0.25 → 160px 图表示 640 场景单位，线宽 4px；drawImage 放大
+        # 4 倍后线宽回到 1 设备像素、alpha 190，与 cosmetic 直接绘制一致。
+        side = max(1, int(math.ceil(_TILE_CACHE * lod)))
+        if img is None or img.width() != side:
+            img = QImage(side, side, QImage.Format_ARGB32)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.scale(lod, lod)
+        p.translate(-bx * _TILE_CACHE, -by * _TILE_CACHE)
+        line_w = max(1, int(math.ceil(1.0 / lod)))
+        rect = QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
+                      _TILE_CACHE, _TILE_CACHE)
+        rect = rect.adjusted(-32, -48, 32, 32)   # 标签/箭头溢出余量
+        for obj in self._candidates(rect):
+            if getattr(obj, "visible", True) and self._obj_bounds(obj).intersects(rect):
+                self._paint_object(p, obj, False, show_label=show_labels,
+                                   line_width=line_w)
+        p.end()
+        self._tile_cache[key] = img
+        self._tile_labels = show_labels
+        if key not in self._tile_lru:
+            self._tile_lru.append(key)
+        self._evict_tiles()
+        return img
+
+    def _evict_tiles(self):
+        while len(self._tile_cache) > _TILE_CACHE_MAX:
+            old = self._tile_lru.pop(0) if self._tile_lru else next(iter(self._tile_cache))
+            self._tile_cache.pop(old, None)
+
+    def _paint_tile_cache(self, painter, visible: QRectF, show_labels: bool):
+        """分块缓存路径：逐块 drawImage，块内只渲染视口相交的对象。"""
+        if self._tile_dirty_all:
+            self._tile_cache.clear()
+            self._tile_lru.clear()
+            self._tile_dirty_all = False
+        lod = _choose_tile_lod(self._scale)
+        for bx, by in self._tile_key_range(visible, lod):
+            img = self._tile_image(bx, by, lod, show_labels)
+            painter.drawImage(
+                QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
+                       _TILE_CACHE, _TILE_CACHE),
+                img, QRectF(0, 0, img.width(), img.height()))
+        # 缓存块里烘焙的是未选中样式；选中态 / 预览 / 组框每帧单独覆盖。
+        sel_ids = self._sel_ids
+        for obj in self.selected:
+            if not getattr(obj, "visible", True):
+                continue
+            if not visible.isEmpty() and not self._obj_bounds(obj).intersects(visible):
+                continue
+            self._paint_object(painter, obj, True, show_label=False)
+        if self.preview is not None:
+            if visible.isEmpty() or self._obj_bounds(self.preview).intersects(visible):
+                self._paint_object(painter, self.preview, False, preview=True)
+
+    def _invalidate_tiles_for_rect(self, rect: QRectF):
+        """对象编辑后标脏覆盖范围涉及的块（所有 LOD 档）。"""
+        if not self._tile_cache:
+            return
+        x0 = math.floor(rect.left() / _TILE_CACHE) - 1
+        x1 = math.floor(rect.right() / _TILE_CACHE) + 1
+        y0 = math.floor(rect.top() / _TILE_CACHE) - 1
+        y1 = math.floor(rect.bottom() / _TILE_CACHE) + 1
+        for key in list(self._tile_cache):
+            _lod, bx, by = key
+            if x0 <= bx <= x1 and y0 <= by <= y1:
+                self._tile_cache.pop(key, None)
+                try:
+                    self._tile_lru.remove(key)
+                except ValueError:
+                    pass
+
+    def _update_cache(self, rects):
+        """对象移动 / 编辑后只重画受影响的那一小块缓存。"""
+        cache = self._obj_cache
+        if cache is None or self._cache_dirty:
+            return
+        dirty = QRectF()
+        for rect in rects:
+            dirty = dirty.united(rect)
+        if dirty.isEmpty():
+            return
+        if not self._cache_rect.contains(dirty):
+            self._cache_dirty = True   # 移出缓存覆盖范围：下帧全量重建
+            return
+        # 标签画在框上方、箭头伸到框外，留白必须一起覆盖，否则会留残影。
+        dirty = dirty.adjusted(-28, -40, 28, 28)
+        p = QPainter(cache)
+        p.translate(-self._cache_rect.left(), -self._cache_rect.top())
+        p.setCompositionMode(QPainter.CompositionMode_Clear)
+        p.fillRect(dirty, Qt.transparent)
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        for obj in self._candidates(dirty):
+            if getattr(obj, "visible", True) \
+                    and self._obj_bounds(obj).intersects(dirty):
+                self._paint_object(p, obj, False, show_label=self._cache_labels)
+        p.end()
 
     # ---------------- 绘制 ----------------
     def paint(self, painter, option, widget=None):
@@ -363,18 +722,21 @@ class ObjectLayerItem(QGraphicsItem):
         # 保证不漏画。
         visible = option.exposedRect if option is not None else QRectF()
         cull = not visible.isEmpty()
-        gfont = QFont()
-        gfont.setBold(True)
+        if self._index_dirty:
+            self._rebuild_index()
+        candidates = self._candidates(visible)
+        # 缩得太小时文字不足 8px：既看不清，drawText 又占整帧大头。
+        show_labels = self.show_names and self._scale >= _LABEL_MIN_SCALE
 
-        # 组合可视化（点阵图可见）：先按组名归并成员，画半透明组色包围框 + 组名标签。
+        # 组合可视化：只算包围盒数据，实际绘制放到对象之后（标签再放最上层）。
         groups = {}
-        for obj in self.layer.objects:
+        for obj in candidates:
             if not getattr(obj, "visible", True):
                 continue
             g = obj.properties.get(EDITOR_GROUP_PROPERTY) if obj.properties else None
             if g:
                 groups.setdefault(g, []).append(obj)
-        group_boxes = []   # (hull, color, label) —— 留到对象之后画标签，避免被盖住
+        group_boxes = []   # (hull, color, label)
         if groups:
             for gname, members in groups.items():
                 hull = None
@@ -386,43 +748,85 @@ class ObjectLayerItem(QGraphicsItem):
                 hull = hull.adjusted(-6, -6, 6, 6)
                 if cull and not hull.intersects(visible):
                     continue
-                col = group_color(gname)
-                painter.save()
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor(col.red(), col.green(), col.blue(), 38))
-                painter.drawRoundedRect(hull, 6, 6)
-                painter.restore()
-                painter.setPen(QPen(col, 1))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawRoundedRect(hull, 6, 6)
-                group_boxes.append((hull, col, gname))
+                group_boxes.append((hull, group_color(gname), gname))
 
-        for obj in self.layer.objects:
+        # 超大场景（对象跨度超过单图像素上限）：分块 LOD 缓存。
+        if self._use_tile_cache():
+            self._paint_tile_cache(painter, visible, show_labels)
+            self._paint_group_frames(painter, group_boxes)
+            self._paint_group_labels(painter, group_boxes, show_labels)
+            return
+
+        cache = self._ensure_cache(show_labels)
+        if cache is not None:
+            # 大对象量：整层一次 drawPixmap，此前逐对象绘制全部省掉。
+            src = visible.intersected(self._cache_rect) if cull else self._cache_rect
+            if not src.isEmpty():
+                painter.drawImage(
+                    src, cache,
+                    src.translated(-self._cache_rect.left(),
+                                   -self._cache_rect.top()))
+            # 缓存里画的是未选中样式；选中态 / 节点手柄单独覆盖这几帧。
+            for obj in self.selected:
+                if not getattr(obj, "visible", True):
+                    continue
+                if cull and not self._obj_bounds(obj).intersects(visible):
+                    continue
+                # 缓存里已有未选中标签，叠加时只覆盖框 / 节点，标签别画两遍。
+                self._paint_object(painter, obj, True, show_label=False)
+            if self.preview is not None:
+                if not cull or self._obj_bounds(self.preview).intersects(visible):
+                    self._paint_object(painter, self.preview, False, preview=True)
+            self._paint_group_frames(painter, group_boxes)
+            self._paint_group_labels(painter, group_boxes, show_labels)
+            return
+
+        self._paint_group_frames(painter, group_boxes)
+        for obj in candidates:
             if not getattr(obj, "visible", True):
                 continue
             if cull and not self._obj_bounds(obj).intersects(visible):
                 continue
-            self._paint_object(painter, obj, id(obj) in sel_ids)
+            self._paint_object(painter, obj, id(obj) in sel_ids,
+                               show_label=show_labels)
         if self.preview is not None:
             if not cull or self._obj_bounds(self.preview).intersects(visible):
                 self._paint_object(painter, self.preview, False, preview=True)
+        self._paint_group_labels(painter, group_boxes, show_labels)
 
-        # 组名标签画在最上层（不被对象框盖住），附在组包围框左上角外侧。
-        if group_boxes:
-            painter.setFont(gfont)
-            for hull, col, gname in group_boxes:
-                painter.setPen(col)
-                painter.drawText(QPointF(hull.x() + 3, hull.y() - 4),
-                                f"组：{gname}")
+    def _paint_group_frames(self, painter, group_boxes):
+        for hull, col, _gname in group_boxes:
+            painter.save()
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(col.red(), col.green(), col.blue(), 38))
+            painter.drawRoundedRect(hull, 6, 6)
+            painter.restore()
+            painter.setPen(QPen(col, 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(hull, 6, 6)
 
-    def _paint_object(self, painter, obj, is_selected: bool, preview: bool = False):
+    def _paint_group_labels(self, painter, group_boxes, show_labels: bool):
+        if not group_boxes or not show_labels:
+            return
+        painter.setFont(_GROUP_FONT)
+        for hull, col, gname in group_boxes:
+            painter.setPen(col)
+            painter.drawText(QPointF(hull.x() + 3, hull.y() - 4),
+                            f"组：{gname}")
+
+    def _paint_object(self, painter, obj, is_selected: bool, preview: bool = False,
+                      show_label: bool = True, line_width: int | None = None):
         rect = object_rect(obj, self.doc.tile_w, self.doc.tile_h)
-        if preview:
-            pen = QPen(QColor(255, 200, 60, 210), 2, Qt.DashLine)
+        # 对象框恒为黄色：选中不再改成蓝色，也不额外加一层边框线。
+        if line_width is not None and line_width > 1:
+            # 分块缓存块内：线宽按 1/lod 补偿，保证缩放后回到 1 设备像素、
+            # alpha 不随缩放稀释（见 _tile_image 注释）。
+            base = QColor(255, 200, 60, 190)
+            pen = QPen(base, line_width)
+            painter.setPen(pen)
         else:
-            # 对象框恒为黄色：选中不再改成蓝色，也不额外加一层边框线。
-            pen = QPen(QColor(255, 200, 60, 255 if is_selected else 190), 1)
-        painter.setPen(pen)
+            painter.setPen(_PEN_PREVIEW if preview else
+                           (_PEN_SELECTED if is_selected else _PEN_NORMAL))
         painter.setBrush(Qt.NoBrush)
 
         shape = obj.shape
@@ -486,7 +890,7 @@ class ObjectLayerItem(QGraphicsItem):
             painter.setBrush(Qt.NoBrush)
 
         # 名称标签：只画有名字 / 类型的对象，避免画布上出现 "#12" 这类编号。
-        if self.show_names and not preview and (obj.name or obj.type_):
+        if show_label and not preview and (obj.name or obj.type_):
             painter.setPen(_LABEL_YELLOW)
-            painter.setFont(QFont())
+            painter.setFont(_LABEL_FONT)
             painter.drawText(QPointF(rect.x(), rect.y() - 4), obj.label)

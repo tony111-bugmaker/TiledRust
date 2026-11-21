@@ -121,20 +121,21 @@ class ToolbarMergeTest(unittest.TestCase):
         w.view.objectToolReleased.emit(180.0, 100.0)
         got = {o.object_id for o in w.scene.selected_objects}
         self.assertEqual(got, {1, 2})
+        # 用户要求：对象层框选只选对象、不碰瓦片选区；框到多个对象时
+        # 选框贴合对象外接矩形并保留。
         self.assertIsNone(w._tile_selection)
-        self.assertIsNone(w._sel_rect)
+        self.assertIsNotNone(w._sel_rect)
 
-    def test_click_object_from_tile_layer_selects_and_shows_resize_handles(self):
-        """旧 S 的行为不能丢：瓦片层激活时点对象也要出 8 个黄色箭头。"""
+    def test_click_object_from_tile_layer_is_ignored(self):
+        """瓦片层激活时对象对鼠标透明：点对象不选中、不出 8 个黄色箭头。"""
         w = self.w
         w._on_layer_selected(self.tile)
         w._set_object_tool("select")
         w.view.objectToolPressed.emit(60.0, 60.0)
         w.view.objectToolReleased.emit(60.0, 60.0)
-        self.assertEqual([o.object_id for o in w.scene.selected_objects], [1])
+        self.assertEqual(list(w.scene.selected_objects), [])
         item = w.scene._obj_sel_box
-        self.assertIsInstance(item, ObjectSelectionBoxItem)
-        self.assertTrue(item.isVisible())
+        self.assertTrue(item is None or not item.isVisible())
         self.assertIsNone(w._tile_selection)   # 点对象不该顺手框出瓦片选区
 
     def test_drag_object_is_one_undo_step(self):

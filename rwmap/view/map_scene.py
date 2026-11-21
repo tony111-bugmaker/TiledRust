@@ -6,7 +6,15 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsRectItem
 
 from ..document.gid import split_gid
-from ..tilesets.tile_cache import cache_version, get_pixmap
+from ..tilesets.tile_cache import cache_version, get_pixmap_fitted
+
+
+def get_pixmap(ts, local_id, flags, tw, th, resolver=None):
+    """模块内取图块入口：等比缩放塞进 tw×th 的地图格子。
+
+    保留 ``get_pixmap`` 名字供既有图章性能/缓存测试 mock；已升级为等比适配。
+    """
+    return get_pixmap_fitted(ts, local_id, flags, tw, th, resolver)
 
 # 图章影像预渲染缓存的像素上限（约 32 MB @ RGBA）。超过就回退逐格绘制，
 # 避免用户抓整张地图当图章时一次性申请上百 MB 显存。
@@ -455,7 +463,7 @@ class TileStampPreviewItem(QGraphicsItem):
                     continue
                 ts, local_id = located
                 tile = get_pixmap(ts, local_id, (flip_h, flip_v, flip_d),
-                                  self.doc.resolver)
+                                  tw, th, self.doc.resolver)
                 if tile is not None:
                     p.drawPixmap(dx * tw, y, tile)
         p.end()
@@ -510,7 +518,7 @@ class TileStampPreviewItem(QGraphicsItem):
                         continue
                     ts, local_id = located
                     tile = get_pixmap(ts, local_id, (flip_h, flip_v, flip_d),
-                                      self.doc.resolver)
+                                      tw, th, self.doc.resolver)
                     if tile is not None:
                         painter.drawPixmap(tx + dx * tw, ty + dy * th, tile)
         painter.setOpacity(1.0)
@@ -697,10 +705,10 @@ class MapScene(QGraphicsScene):
             if isinstance(item, ObjectLayerItem):
                 item.set_preview(obj)
 
-    def refresh_object_rects(self, layer, rects):
+    def refresh_object_rects(self, layer, rects, objects=None):
         item = self.layer_items.get(id(layer))
         if isinstance(item, ObjectLayerItem):
-            item.refresh_rects(rects)
+            item.refresh_rects(rects, objects)
 
     def refresh_object_region(self, obj):
         """对象被移动 / 改名时，只标脏它自己的那块矩形。"""

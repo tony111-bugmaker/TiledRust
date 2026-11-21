@@ -190,6 +190,39 @@ class ContentTransformWindowTest(unittest.TestCase):
         self.assertAlmostEqual(o.x + o.width / 2, cx)
         self.assertAlmostEqual(o.y + o.height / 2, cy)
 
+    def test_image_transform_keeps_selection_bound_to_document(self):
+        """变换后选中对象必须是文档里的新引用，不能停在撤销快照的旧引用上。
+
+        2026-11-21 用户反馈：图片点右侧 4 个变换键后黄色手柄消失、拖不动，
+        必须重新点一下才能移动。根因是 push_object_edit 克隆对象后，
+        _transform_images 又把选中态写回克隆前的旧引用。
+        """
+        w = self.w
+        w.scene.set_selected_objects([self.image])
+        for op in ("flip_h", "flip_v", "rot_cw", "rot_ccw"):
+            w._transform_content(op)
+            sel = w.scene.selected_objects
+            self.assertEqual(len(sel), 1, f"{op}: 变换后应保持单选")
+            # 必须就是文档里的同一个对象（identity），否则拖的是脱离文档的旧对象
+            self.assertIs(sel[0], self.obj(1),
+                          f"{op}: 选中对象必须是文档中的新引用，不是旧快照引用")
+            self.assertTrue(all(a.isEnabled() for a in self.actions()),
+                            f"{op}: 变换后 4 键仍应点亮")
+            box = w._obj_selection_box()
+            self.assertIsNotNone(box, f"{op}: 黄色选框应保留")
+            # 命中测试：点对象中心应判定为「已在选中框内」→ 可直接拖动
+            o = self.obj(1)
+            cx, cy = o.x + o.width / 2, o.y + o.height / 2
+            self.assertTrue(box.contains(cx, cy), f"{op}: 对象中心应在选框内")
+            # 真实拖一下：变换后不重新点选也要能移动文档里的对象
+            x0, y0 = o.x, o.y
+            w._on_object_press(cx, cy)
+            w._on_object_move(cx + 30, cy + 25)
+            w._on_object_release(cx + 30, cy + 25)
+            o2 = self.obj(1)
+            self.assertEqual((o2.x - x0, o2.y - y0), (30, 25),
+                             f"{op}: 变换后应可直接拖动（无需重新选中）")
+
     def test_stamp_transform_via_button(self):
         w = self.w
         w.state.stamp = [[1, 2, 3], [4, 5, 6]]

@@ -405,6 +405,22 @@ class NodeItem(QGraphicsObject):
     def scene_port_in(self) -> QPointF:
         return self.port_in()
 
+    def contextMenuEvent(self, event):
+        """节点右键：对当前选中批（含未渲染节点）弹组 / 删除菜单。
+
+        右键落在未选中的节点上时先改选它，避免把上一次残留的选中项一起操作；
+        落在已选中节点上则保留多选，菜单作用于整批。事件必须 accept，否则会
+        冒泡到 view / 顶层，弹出之前那个「一闪而过的空菜单」。
+        """
+        dock = self.scene().dock
+        if dock is None:
+            return
+        if self.node.key not in dock._selected_keys:
+            dock.select_objects([self.node.obj])
+        menu = dock.node_context_menu()
+        menu.exec(event.screenPos())
+        event.accept()
+
     def paint(self, painter: QPainter, _option, _widget=None):
         obj = self.node.obj
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -1075,11 +1091,38 @@ class GraphView(QGraphicsView):
             self.viewport().unsetCursor()
             event.accept()
             return
+        # 节点上右键：view / viewport 都是 NoContextMenu（防止框选结束闪空菜单），
+        # Qt 不会派发 QContextMenuEvent，NodeItem.contextMenuEvent 永远收不到。
+        # 所以在这里按鼠标释放位置显式弹菜单；右键按下节点时没有建 band，
+        # 正好用 _band is None 区分「点节点」与「框选」。
+        if (event.button() == Qt.RightButton and self._band is None
+                and self._link_src is None and dock is not None):
+            p = event.position().toPoint()
+            hit = self.itemAt(p)
+            if isinstance(hit, NodeItem):
+                if hit.node.key not in dock._selected_keys:
+                    dock.select_objects([hit.node.obj])
+                dock.node_context_menu().exec(
+                    self.viewport().mapToGlobal(p))
+                event.accept()
+                return
         if self._band is not None and event.button() == Qt.RightButton:
             rect = self._band.rect()
             self.scene().removeItem(self._band)
             self._band = None
             dock = self.scene().dock
+            # 右键「单击」空白（没有拉出选区）：已有选中对象时当作菜单入口，
+            # 方便框选后在空白处右键批量移动 / 删除；右键拖拽仍是原来的框选。
+            p0 = self.mapFromScene(rect.topLeft())
+            p1 = self.mapFromScene(rect.bottomRight())
+            if abs(p1.x() - p0.x()) < 6 and abs(p1.y() - p0.y()) < 6:
+                if dock._selected_keys:
+                    dock.node_context_menu().exec(
+                        self.viewport().mapToGlobal(event.pos()))
+                else:
+                    self.scene().clearSelection()
+                event.accept()
+                return
             items = [i for i in dock.node_items.values()
                      if i.sceneBoundingRect().intersects(rect)]
             # 批量选中：先屏蔽 selectionChanged，避免每 setSelected 一次就跑
@@ -1484,9 +1527,14 @@ class TriggerGraphDock(QDockWidget):
             QTimer.singleShot(0, self.fit_view)
 
     def set_document(self, doc, undo_stack=None, on_change=None):
+        old_doc = self.doc
         self.doc = doc
         self.undo_stack = undo_stack
         self.on_change = on_change
+        # 换文档时数据层 key 不再有意义，必须随旧 scene 一起丢弃；否则新建组
+        # 会把上个文档残留的 _selected_keys 当成当前选中对象。
+        if doc is not old_doc:
+            self._selected_keys.clear()
         self._manual_pos.clear()
         self._pos_cache.clear()
         self._detail_uid = None
@@ -1822,7 +1870,18 @@ class TriggerGraphDock(QDockWidget):
             return
         for e in list(it.edges):
             self._remove_edge_item(e)
-        self.scene.removeItem(it)
+        # 回收「视口外 / 概览模式」的节点只是不渲染，不等于用户取消选择。
+        # removeItem 会让 Qt 清掉 scene 选中集并发 selectionChanged，若不放行
+        # 屏蔽，_on_selection_changed 会把数据层 _selected_keys 一并清空，右
+        # 侧属性面板也被清掉——表现就是「放大回去没渲染过的对象全掉选」。
+        # blockSignals 不是引用计数，外层（_rebuild_live）可能已屏蔽过，必须
+        # 先记下原状态再恢复，不能无条件 blockSignals(False)。
+        prev = self.scene.signalsBlocked()
+        self.scene.blockSignals(True)
+        try:
+            self.scene.removeItem(it)
+        finally:
+            self.scene.blockSignals(prev)
 
     def _clear_live_items(self):
         for key in list(self.node_items.keys()):
@@ -2181,8 +2240,16 @@ class TriggerGraphDock(QDockWidget):
                 self._loading = False
                 items = [i for i in self.scene.selectedItems()
                          if isinstance(i, NodeItem)]
-        # 数据层选中态：跨虚拟化存活（节点滚出视口被回收后，滚回仍保持选中高亮）
-        self._selected_keys = {i.node.key for i in items}
+        # 数据层选中态：跨虚拟化存活（节点滚出视口被回收后，滚回仍保持选中高亮）。
+        # 同组自动扩容也要覆盖「当前页里但没被渲染」的节点：选中态属于数据，
+        # 渲染与否只由视口决定。只扩容 live 节点的话，缩放后同组未渲染对象
+        # 就会掉出选中集，右键批量移动 / 删除也就漏掉它们。
+        keys = {i.node.key for i in items}
+        if groups:
+            active = self._active_keys()
+            keys.update(k for k, n in self.data.nodes.items()
+                        if k in active and n.group in groups)
+        self._selected_keys = keys
         self._show_detail(items[0].node)
         self.objectSelected.emit(items[0].node.obj)
 
@@ -2288,6 +2355,109 @@ class TriggerGraphDock(QDockWidget):
         return [i for i in self.scene.selectedItems()
                 if isinstance(i, NodeItem)]
 
+    def _selected_graph_nodes(self) -> list:
+        """数据层选中节点（含被视口裁剪、当前未渲染的对象）。
+
+        右键批量操作必须以这里为准：``scene.selectedItems()`` 只有 live 节点，
+        缩小再放大后拿它做批量分组 / 删除，会漏掉那些「选中但没渲染」的对象。
+        """
+        if not self._selected_keys:
+            return []
+        return [n for k, n in self.data.nodes.items()
+                if k in self._selected_keys]
+
+    def node_context_menu(self) -> QMenu:
+        """构造节点右键菜单（只构造、不 exec，便于测试）。
+
+        菜单作用于数据层选中批：单选只影响该对象，框选 / 多选则整批一起处理；
+        未渲染的对象同样算在内。
+        """
+        nodes = self._selected_graph_nodes()
+        count = len(nodes)
+        menu = QMenu(self)
+        menu.setTitle(f"已选 {count} 个对象" if count > 1
+                      else (nodes[0].obj.label if nodes else "节点"))
+        sub = menu.addMenu("加入已有组")
+        act_none = sub.addAction("选择已有组（取消分组）")
+        act_none.triggered.connect(
+            lambda _checked=False: self._move_selected_to_group(""))
+        for name in self.available_groups():
+            act = sub.addAction(name)
+            act.triggered.connect(
+                lambda _checked=False, g=name: self._move_selected_to_group(g))
+        act_new = menu.addAction("加入新建组…")
+        act_new.triggered.connect(self._new_group_dialog)
+        menu.addSeparator()
+        act_del = menu.addAction(
+            f"删除（{count} 个对象）" if count > 1 else "删除")
+        act_del.triggered.connect(self._delete_selected_objects)
+        return menu
+
+    @staticmethod
+    def _clear_group_property(node):
+        bag = node.obj.properties
+        bag.values.pop(EDITOR_GROUP_PROPERTY, None)
+        bag.types.pop(EDITOR_GROUP_PROPERTY, None)
+        bag.text_props.discard(EDITOR_GROUP_PROPERTY)
+
+    def _move_selected_to_group(self, name: str):
+        """把选中对象（含未渲染）整体移动到指定组；name='' 表示取消分组。"""
+        nodes = self._selected_graph_nodes()
+        if not nodes:
+            self.status.setText("请先选中若干节点")
+            return
+        before = capture([self._layer_of(n) for n in nodes])
+        for n in nodes:
+            if name:
+                n.obj.properties.set(EDITOR_GROUP_PROPERTY, name, "string")
+            else:
+                self._clear_group_property(n)
+        label = name or "选择已有组"
+        pushed = self._push_object_edit(
+            before, f"加入组「{label}」",
+            f"已将 {len(nodes)} 个对象移动到「{label}」（Ctrl+Z 可撤销）")
+        self.set_group_page(name)
+        self.select_objects([n.obj for n in nodes])
+        if not pushed:
+            self.status.setText(
+                f"已将 {len(nodes)} 个对象移动到「{label}」（无变化）")
+
+    def _delete_selected_objects(self):
+        """批量删除选中对象（含未渲染、可跨层），整批只占一条撤销记录。"""
+        nodes = self._selected_graph_nodes()
+        if not nodes or self.doc is None:
+            self.status.setText("请先选中若干节点")
+            return
+        targets: dict[int, set] = {}
+        layers = []
+        for n in nodes:
+            layer = self._layer_of(n)
+            if layer is None:
+                continue
+            if id(layer) not in targets:
+                targets[id(layer)] = set()
+                layers.append(layer)
+            targets[id(layer)].add(object_uid(n.obj))
+        if not layers:
+            self.status.setText("找不到这些对象所属的对象层，未删除")
+            return
+        before = capture(layers)
+        for layer in layers:
+            uids = targets[id(layer)]
+            layer.objects = [o for o in layer.objects
+                             if object_uid(o) not in uids]
+            layer.dirty = True
+        self.doc.dirty = True
+        # 重建前丢掉选中态，否则已删掉的 key 会作为「已选」写回新节点。
+        self._selected_keys.clear()
+        self._clear_detail(reset=True)
+        pushed = push_object_edit(
+            self.doc, self.undo_stack, before,
+            f"删除 {len(nodes)} 个触发器对象", self._after_object_change)
+        if not pushed:
+            self._after_object_change()
+        self.status.setText(f"已删除 {len(nodes)} 个对象（Ctrl+Z 可撤销）")
+
     def _push_object_edit(self, before, text, message: str | None = None) -> bool:
         """把属性改动（分组 / 连线）登记成一条撤销命令；跨层也只算一步。
 
@@ -2307,19 +2477,20 @@ class TriggerGraphDock(QDockWidget):
             self.status.setText(message)
         return pushed
 
-    def _set_group_on_nodes(self, items, name: str):
+    def _set_group_on_nodes(self, nodes, name: str):
         """把选中节点对应的对象都标上同一分组名（EDITOR_GROUP_PROPERTY）。
 
+        ``nodes`` 是数据层节点（可含未渲染项），不是 scene 里的 NodeItem。
         改动登记成一条撤销命令（与画布右键「组合」同一套命令），
         完成后切到该组页，方便立刻看到分组结果。
         """
-        if not items or not name:
+        if not nodes or not name:
             return
         objs = []
-        before = capture([self._layer_of(item.node) for item in items])
-        for item in items:
-            item.node.obj.properties.set(EDITOR_GROUP_PROPERTY, name, "string")
-            objs.append(item.node.obj)
+        before = capture([self._layer_of(n) for n in nodes])
+        for n in nodes:
+            n.obj.properties.set(EDITOR_GROUP_PROPERTY, name, "string")
+            objs.append(n.obj)
         self._push_object_edit(
             before, f"组合 {len(objs)} 个对象",
             f"已将 {len(objs)} 个对象分到「{name}」（Ctrl+Z 可撤销）")
@@ -2472,7 +2643,7 @@ class TriggerGraphDock(QDockWidget):
         组名是从对象私有属性反推的，空组没有任何对象承载它，所以保存 / 重开
         之后自然不会保留；用户随后把对象加进这个组，它才会真正写进地图。
         """
-        items = self._selected_nodes()
+        nodes = self._selected_graph_nodes()
         default = f"组{len(self.available_groups()) + 1}"
         name, ok = QInputDialog.getText(
             self, "新建组",
@@ -2482,7 +2653,7 @@ class TriggerGraphDock(QDockWidget):
         if not ok or not name.strip():
             return
         name = name.strip()
-        if not items:
+        if not nodes:
             self._empty_groups.add(name)
             self._refresh_groups()
             self.set_group_page(name)
@@ -2490,34 +2661,13 @@ class TriggerGraphDock(QDockWidget):
                 f"已新建空组「{name}」：本次会话可用；没存任何对象，"
                 "保存后不会保留（组名靠对象属性反推）")
             return
-        self._set_group_on_nodes(items, name)
+        self._set_group_on_nodes(nodes, name)
         self.status.setText(
-            f"已新建组「{name}」，包含 {len(items)} 个对象（Ctrl+Z 可撤销）")
+            f"已新建组「{name}」，包含 {len(nodes)} 个对象（Ctrl+Z 可撤销）")
 
     def _join_selected_to_group(self, name: str):
-        """把选中节点加入指定组；name='' 表示回到「选择已有组」（取消私有分组）。"""
-        items = self._selected_nodes()
-        if not items:
-            self.status.setText("请先选中若干节点")
-            return
-        before = capture([self._layer_of(item.node) for item in items])
-        if name == "":
-            for item in items:
-                obj = item.node.obj
-                obj.properties.values.pop(EDITOR_GROUP_PROPERTY, None)
-                obj.properties.types.pop(EDITOR_GROUP_PROPERTY, None)
-            label = "选择已有组"
-        else:
-            for item in items:
-                item.node.obj.properties.set(EDITOR_GROUP_PROPERTY, name, "string")
-            label = name
-        pushed = self._push_object_edit(
-            before, f"加入组「{label}」",
-            f"已将 {len(items)} 个对象加入「{label}」（Ctrl+Z 可撤销）")
-        self.set_group_page(name)
-        self.select_objects([i.node.obj for i in items])
-        if not pushed:
-            self.status.setText(f"已将 {len(items)} 个对象加入「{label}」（无变化）")
+        """把选中节点加入指定组（工具按钮入口，与右键菜单同一套数据层逻辑）。"""
+        self._move_selected_to_group(name)
 
     # ---------------- 属性面板接线 ----------------
     def _layer_of(self, node: GraphNode):

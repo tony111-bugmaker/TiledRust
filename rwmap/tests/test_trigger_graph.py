@@ -1379,5 +1379,141 @@ class BoxSelectPerformanceTest(unittest.TestCase):
         self.assertEqual(len(dock._selected_keys), n)
 
 
+class GraphSelectionAndContextMenuTest(unittest.TestCase):
+    """选中态属于数据层，视口虚拟化只影响渲染；右键可批量移动组 / 删除。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.w = MainWindow(auto_open=False)
+
+    def tearDown(self):
+        self.w.trigger_graph_dock.hide()
+        self.w.act_trigger_graph.setChecked(False)
+        apply_default_layout(self.w)
+
+    def _setup(self):
+        from rwmap.widgets.trigger_graph_dock import EDITOR_GROUP_PROPERTY
+        dock = self.w.trigger_graph_dock
+        dock.hide()
+        dock.view.resetTransform()
+        dock._exit_overview()
+        dock.search_edit.clear()
+        dock._group_page = ""
+        dock._empty_groups.clear()
+        dock.set_document(make_doc())
+        dock.refresh(fit=False)
+        return dock
+
+    def test_recycled_and_overview_nodes_keep_selection(self):
+        """节点被视口裁剪 / 概览回收时只停渲染，数据层选中与属性都保留。"""
+        dock = self._setup()
+        keys = list(dock.data.nodes)
+        objs = [n.obj for n in dock.data.nodes.values()]
+        dock.select_objects(objs[:2])
+        self.assertEqual(dock._selected_keys, set(keys[:2]))
+
+        with patch.object(dock, "_clear_detail", wraps=dock._clear_detail) as clr:
+            # 裁掉一个「已选中」节点：removeItem 不能把数据层选中清空
+            dock._rebuild_live({keys[0]}, set(keys), None)
+            self.assertEqual(dock._selected_keys, set(keys[:2]))
+            self.assertNotIn(keys[1], dock.node_items)
+            # 进入概览会回收全部 live 节点，选中态同样不能丢
+            dock._enter_overview()
+            self.assertEqual(dock.node_items, {})
+            self.assertEqual(dock._selected_keys, set(keys[:2]))
+        clr.assert_not_called()
+
+        dock._exit_overview()
+        dock._rebuild_live(set(keys), set(keys), None)
+        self.assertEqual({k for k, it in dock.node_items.items()
+                          if it.isSelected()}, set(keys[:2]))
+
+    def test_context_menu_moves_all_selected_including_unrendered(self):
+        """右键菜单把选中对象整批移组，未渲染的那个也必须写进文档。"""
+        from rwmap.widgets.trigger_graph_dock import EDITOR_GROUP_PROPERTY
+        dock = self._setup()
+        keys = list(dock.data.nodes)
+        dock.select_objects([n.obj for n in dock.data.nodes.values()])
+        dock._rebuild_live({keys[0]}, set(keys), None)   # 3 个已选节点不渲染
+        dock._empty_groups.add("组X")
+
+        menu = dock.node_context_menu()
+        labels = [a.text() for a in menu.actions()]
+        self.assertTrue(any("加入已有组" in t for t in labels), labels)
+        self.assertTrue(any("加入新建组" in t for t in labels), labels)
+        self.assertTrue(any("删除（4" in t for t in labels), labels)
+        sub = next(a.menu() for a in menu.actions() if a.text() == "加入已有组")
+        act = next(a for a in sub.actions() if a.text() == "组X")
+        act.trigger()
+
+        layer = dock.doc.layers[0]
+        self.assertEqual(len(layer.objects), 4)
+        self.assertTrue(all(o.properties.get(EDITOR_GROUP_PROPERTY) == "组X"
+                            for o in layer.objects))
+
+    def test_context_menu_deletes_all_selected_including_unrendered(self):
+        """右键批量删除不能漏掉「选中但没渲染」的对象，且整批只算一步。"""
+        dock = self._setup()
+        keys = list(dock.data.nodes)
+        dock.select_objects([n.obj for n in dock.data.nodes.values()])
+        dock._rebuild_live({keys[0]}, set(keys), None)
+
+        menu = dock.node_context_menu()
+        act_del = next(a for a in menu.actions()
+                       if a.text().startswith("删除"))
+        act_del.trigger()
+
+        self.assertEqual(dock.doc.layers[0].objects, [])
+        self.assertEqual(dock._selected_keys, set())
+        self.assertEqual(len(dock.data.nodes), 0)
+
+    def test_right_click_release_on_node_opens_menu(self):
+        """view 关掉系统右键菜单后，必须在鼠标释放时显式弹出节点菜单。"""
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+
+        dock = self._setup()
+        keys = list(dock.data.nodes)
+        item = dock.node_items[keys[0]]
+        pos = dock.view.mapFromScene(item.sceneBoundingRect().center())
+        ev = QMouseEvent(QEvent.Type.MouseButtonRelease, pos,
+                         Qt.RightButton, Qt.RightButton, Qt.NoModifier)
+        shown = []
+
+        class _Menu:
+            def exec(self, _pos): shown.append(_pos)
+
+        with patch.object(dock, "node_context_menu", return_value=_Menu()):
+            dock.view.mouseReleaseEvent(ev)
+        self.assertEqual(len(shown), 1,
+                         "节点上右键释放必须弹出「加入已有组 / 新建组 / 删除」菜单")
+        self.assertEqual(dock._selected_keys, {keys[0]})
+
+    def test_right_click_unselected_node_selects_it_first(self):
+        """右键未选中的单个节点：只操作它，不误带上上次残留的选中批。"""
+        from PySide6.QtCore import QPoint
+        from rwmap.widgets.trigger_graph_dock import NodeItem
+
+        dock = self._setup()
+        keys = list(dock.data.nodes)
+        dock._selected_keys = {keys[1]}
+        item = dock.node_items[keys[0]]
+        shown = []
+
+        class _Event:
+            def screenPos(self): return QPoint(0, 0)
+            def accept(self): shown.append("accepted")
+
+        class _Menu:
+            def exec(self, _pos): shown.append("exec")
+
+        with patch.object(dock, "node_context_menu", return_value=_Menu()):
+            NodeItem.contextMenuEvent(item, _Event())
+        self.assertEqual(dock._selected_keys, {keys[0]})
+        self.assertIn("exec", shown)
+        self.assertIn("accepted", shown)
+
+
 if __name__ == "__main__":
     unittest.main()

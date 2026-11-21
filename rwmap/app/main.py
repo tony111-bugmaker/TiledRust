@@ -1,7 +1,6 @@
 """应用生命周期。支持 --no-sample（不自动打开示例）与 --probe（无 GUI 跑探针）。"""
 from __future__ import annotations
 
-import os
 import sys
 import traceback
 
@@ -19,13 +18,6 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv)
     app.setApplicationName("rwmap")
     app.setOrganizationName("rwmap")
-
-    # 兜底守卫：挡住无标题顶层空窗并记录触发栈（RW_WINDOW_GUARD=0 可关）。
-    # 保持强引用，避免事件过滤器被 GC。
-    if os.environ.get("RW_WINDOW_GUARD", "1") != "0":
-        from .empty_window_guard import EmptyWindowGuard
-        app._empty_window_guard = EmptyWindowGuard()
-        app.installEventFilter(app._empty_window_guard)
 
     logger = get_logger("rwmap.app")
     try:

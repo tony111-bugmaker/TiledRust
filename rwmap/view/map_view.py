@@ -306,14 +306,19 @@ class MapView(QGraphicsView):
             # 对应方向的缩放箭头，其它工具完全不受影响。
             self.objectHover.emit(*self._scene_xy(pos))
         col, row = self._cell(pos)
-        if self._in_bounds(col, row):
+        if self._doc is not None:
             raw = 0
-            scene = self.scene()
-            state_layer = getattr(scene, "current_layer", None)
-            if state_layer is not None and state_layer.in_bounds(col, row):
-                raw = state_layer.get(col, row)
+            inside = self._in_bounds(col, row)
+            if inside:
+                scene = self.scene()
+                state_layer = getattr(scene, "current_layer", None)
+                if state_layer is not None and state_layer.in_bounds(col, row):
+                    raw = state_layer.get(col, row)
+            # 悬停 / 图章虚影必须能跟到地图外：预览层本身支持红色越界格，
+            # 只在地图内发 hoverCell 会让右键抓出来的图章停在边界上，
+            # 没法「整块移到地图外」。真正写格仍由下面的 cellMoved 限制在界内。
             self.hoverCell.emit(col, row, raw)
-            if (event.buttons() & Qt.LeftButton
+            if (inside and event.buttons() & Qt.LeftButton
                     and not (event.modifiers() & Qt.AltModifier)
                     and self.object_mode == "brush"):
                 self.cellMoved.emit(col, row)

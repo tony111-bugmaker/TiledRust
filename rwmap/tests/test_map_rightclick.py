@@ -218,6 +218,18 @@ class MapViewRightClickRoutingTest(unittest.TestCase):
         self.assertEqual(len(self.w.state.stamp), 4)
         self.assertEqual(len(self.w.state.stamp[0]), 4)
 
+    def test_drag_outside_map_captures_empty_cells(self):
+        """右键抓区拖到地图外：越界格按空格处理，不读越界索引、不崩。"""
+        self._press_cell(8, 8)
+        self._move_cell(12, 12)
+        self._release_cell(12, 12)
+        stamp = self.w.state.stamp
+        self.assertIsNotNone(stamp)
+        self.assertEqual(len(stamp), 5)          # 行 8..12
+        self.assertEqual(len(stamp[0]), 5)       # 列 8..12
+        self.assertEqual(stamp[0][0], self.layer.get(8, 8))
+        self.assertEqual(stamp[4][4], 0, "地图外的格应为空，不能读越界索引")
+
 
 class CapturePreviewTest(unittest.TestCase):
     """抓取虚影：读取当前层实时格、topleft 对齐、可清除。"""
@@ -586,6 +598,22 @@ class BrushWithoutTilesetTest(unittest.TestCase):
         self.w._on_press(4, 4)
         self.w._on_release()
         self.assertNotEqual(self.layer.get(4, 4), 77, "抓到图章后应能盖章")
+
+    def test_hover_outside_map_moves_stamp_preview(self):
+        """右键抓出的图章要能整块移到地图外：悬停事件不能只在界内发。"""
+        self.w.state.tool_id = "brush"
+        self.w.state.stamp = [[1, 1], [1, 1]]
+        self.w.view.set_document(self.doc)
+        # 地图 10x10；光标落到 (12,12) 时 2x2 图章（center 对齐）原点 (11,11)
+        p = self.w.view.mapFromScene(QPointF(12 * 20 + 10, 12 * 20 + 10))
+        ev = QMouseEvent(QEvent.Type.MouseMove, p,
+                         Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        self.w.view.mouseMoveEvent(ev)
+        item = self.w.scene._stamp_preview
+        self.assertIsNotNone(item, "地图外悬停时图章预览必须存在")
+        self.assertEqual((item.col, item.row), (12, 12),
+                         "图章预览应跟随光标整体移出地图")
+        self.assertEqual(item._tri_state, "out", "整块已越界时应进入 out 态")
 
     def test_eraser_still_erases(self):
         self.w._set_tool("eraser")

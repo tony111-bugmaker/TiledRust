@@ -1346,6 +1346,17 @@ class MainWindow(QMainWindow):
         )
 
     # ---- 右键拖动抓取地图区域 → 实时虚影 + 松手生成图章 ----
+    @staticmethod
+    def _capture_cells(layer, c0: int, r0: int, c1: int, r1: int):
+        """读取抓取矩形：地图外一律当作空格。
+
+        TileLayer.cells 是定长一维表，get() 不检查边界；负索引会绕回表尾、
+        正越界会 IndexError。右键拖动允许拖到地图外，必须在这里兜住。
+        """
+        return [[layer.get(c, r) if layer.in_bounds(c, r) else 0
+                 for c in range(c0, c1 + 1)]
+                for r in range(r0, r1 + 1)]
+
     def _on_capture_rect(self, region):
         """右键拖动中：把抓取区域（当前层实时格）显示为半透明虚影。"""
         if region is None:
@@ -1359,8 +1370,7 @@ class MainWindow(QMainWindow):
         if cached is not None and cached[0] == region and cached[1] == id(layer):
             return                      # 同区域同层：不重读层、不重建 2D 虚影
         c0, r0, c1, r1 = region
-        cells = [[layer.get(c, r) for c in range(c0, c1 + 1)]
-                 for r in range(r0, r1 + 1)]
+        cells = self._capture_cells(layer, c0, r0, c1, r1)
         self._capture_cache = (region, id(layer), cells)
         self.scene.set_capture_preview(cells, c0, r0)
 
@@ -1369,8 +1379,7 @@ class MainWindow(QMainWindow):
         if not isinstance(layer, TileLayer):
             self.statusBar().showMessage("当前层不是瓦片层，无法抓取图章")
             return
-        stamp = [[layer.get(c, r) for c in range(c0, c1 + 1)]
-                 for r in range(r0, r1 + 1)]
+        stamp = self._capture_cells(layer, c0, r0, c1, r1)
         self.state.stamp = stamp                  # 保留 raw gid（含翻转标志）
         self._refresh_transform_actions()
         self.statusBar().showMessage(
@@ -2617,6 +2626,9 @@ class MainWindow(QMainWindow):
             # 显示框与实际选区统一吸附到格线，避免「看起来 3×2、实际 4×2」。
             self._sel_rect = self._cells_to_rect(self._tile_selection)
             self.scene.set_selection_rect(self._sel_rect)
+            # 当前在瓦片层：对象对鼠标透明，拖框只框瓦片、绝不选中对象。
+            # （要框对象请先切到对象层；Triggers 层拖框仍会同时框到瓦片。）
+            self.scene.set_selected_objects([])
             self.statusBar().showMessage(
                 f"已框选 {self._tile_selection[2]}×{self._tile_selection[3]} 区域；"
                 "Ctrl+C 复制 / Ctrl+V 粘贴 / 拖动选框移动")
@@ -2645,10 +2657,14 @@ class MainWindow(QMainWindow):
         if self.scene.selected_objects and box is not None and box.contains(x, y):
             self._begin_selection_move(x, y)
             return
+        # _hit_object 内置守卫：当前在瓦片层（如 Ground）时对象透明，这里
+        # 只会命中对象层的对象。选中对象时清掉可能残留的瓦片选区。
         _layer, obj = self._hit_object(x, y)
         if obj is not None:
             self._select_object_with_group(obj)
             self._begin_selection_move(x, y)
+            if self._tile_selection:
+                self._clear_tile_selection()
             return
         if isinstance(self._active_layer, ObjectLayer):
             self._obj_marquee = True
@@ -2689,6 +2705,26 @@ class MainWindow(QMainWindow):
         self._sel_rect = self._norm_rect(self._sel_start, (x, y))
         self.scene.set_selection_rect(self._sel_rect)
 
+    def _visible_objects_in_rect(self, rect: QRectF):
+        """收集所有**可见对象层**里与 rect 相交的对象（跨层选择用）。
+
+        选择 / 框选不应受「当前激活层」限制：点中对象（`_hit_object`）早已跨
+        所有对象层，框选也要对齐同一语义。瓦片层本身不参与，只贡献可见性过滤。
+        """
+        if not self._objects_interactive():
+            return []
+        doc = self.state.doc
+        if doc is None:
+            return []
+        out = []
+        for layer in doc.layers:
+            if not isinstance(layer, ObjectLayer) or not layer.visible:
+                continue
+            for o in layer.objects:
+                if getattr(o, "visible", True) and self._object_rect(o).intersects(rect):
+                    out.append(o)
+        return out
+
     def _on_object_marquee_release(self, x, y):
         if not self._obj_marquee:
             return
@@ -2707,15 +2743,26 @@ class MainWindow(QMainWindow):
             self.scene.set_selection_rect(None)
             self._after_marquee_select([obj] if obj is not None else [], layer)
             return
-        # 矩形框选：选中与框相交的所有对象（all 层对象都算，按可见性过滤）。
+        # 矩形框选：选中框内**所有可见对象层**的对象（已不受当前层限制）。
         sel_box = QRectF(rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1])
-        hits = [o for o in layer.objects
-                if getattr(o, "visible", True)
-                and self._object_rect(o).intersects(sel_box)]
+        hits = self._visible_objects_in_rect(sel_box)
         self.scene.set_selected_objects(hits)
-        # 框选只高亮对象本身，松开后蓝色选框撤掉（与 Tiled 行为一致）。
-        self._sel_rect = None
-        self.scene.set_selection_rect(None)
+        # 对象层只选对象、不碰瓦片选区（用户要求：在对象层不能选瓦片）。
+        # 蓝色虚线选框按命中对象数决定：
+        #   0 个 / 1 个 → 选框消失；
+        #   ≥2 个      → 选框贴合所有命中对象的外接矩形（不吸附格线，
+        #                刚好包住对象本身）。
+        if len(hits) >= 2:
+            box = self._obj_selection_box()
+            if box is not None:
+                self._sel_rect = (box.left(), box.top(), box.right(), box.bottom())
+                self.scene.set_selection_rect(self._sel_rect)
+            else:
+                self._sel_rect = None
+                self.scene.set_selection_rect(None)
+        else:
+            self._sel_rect = None
+            self.scene.set_selection_rect(None)
         self._after_marquee_select(hits, layer)
 
     def _after_marquee_select(self, objs, layer):
@@ -3042,7 +3089,15 @@ class MainWindow(QMainWindow):
             {"flip_h": "水平翻转图片", "flip_v": "垂直翻转图片",
              "rot_cw": "顺时针旋转图片", "rot_ccw": "逆时针旋转图片"}[op],
             self._refresh_objects)
-        self.scene.set_selected_objects(list(images))
+        # push_object_edit 用快照重建 layer.objects（对象身份全换），images 已成旧引用。
+        # refresh 回调 _refresh_objects 已按 uid 把选中态重绑到新对象；这里绝不能再
+        # set_selected_objects(images) 写回旧引用——否则黄色手柄消失、拖动作用在
+        # 脱离文档的旧对象上，必须重新点选才能移动（2026-11-21 用户反馈）。
+        if pushed:
+            self._rebind_object_selection(self.state.doc)
+        else:
+            # 无实际变化时层对象未被克隆，images 仍是有效引用。
+            self.scene.set_selected_objects(list(images))
         self._refresh_transform_actions()
         label = {"flip_h": "水平翻转", "flip_v": "垂直翻转",
                  "rot_cw": "顺时针旋转 90°", "rot_ccw": "逆时针旋转 90°"}[op]
@@ -3306,7 +3361,8 @@ class MainWindow(QMainWindow):
         pending["layer"].dirty = True
         self.state.doc.dirty = True
         self.scene.refresh_object_rects(pending["layer"],
-                                        [old, self._object_rect(obj)])
+                                        [old, self._object_rect(obj)],
+                                        [obj, obj])
         self._update_title()
 
     def _node_release(self):
@@ -3370,7 +3426,25 @@ class MainWindow(QMainWindow):
         x, y, w, h = obj.bounds(tw, th)
         return QRectF(x, y, w, h)
 
+    def _objects_interactive(self) -> bool:
+        """对象是否参与鼠标命中 / 交互。
+
+        用户明确要求：当前在瓦片层（如 Ground）时，对象层（如 Triggers）的
+        对象要对鼠标完全「透明」——点不到、框不到、悬停不出缩放箭头、右键
+        也不弹对象菜单。
+
+        判定用「当前层不是瓦片层」而非「必须是对象层」：活动层为 None（如
+        刚建窗口 / 未指定层）时对象仍可交互，避免初始化流程里对象突然全失效。
+        只有明确处于瓦片层时才让对象透明。
+
+        注意 Triggers 层拖框框到 Ground 瓦片仍然保留（对象层框选会同时写
+        瓦片选区），这里的守卫只管「对象能不能被鼠标命中」这一方向。
+        """
+        return not isinstance(self._active_layer, TileLayer)
+
     def _hit_object(self, x: float, y: float):
+        if not self._objects_interactive():
+            return None, None
         doc = self.state.doc
         if doc is None:
             return None, None
@@ -3422,6 +3496,8 @@ class MainWindow(QMainWindow):
         点对象没有尺寸、不可缩放：纯点选区不提供箭头（连整体框也不画箭头），
         因此拖点对象只会移动、不会进入缩放状态。
         """
+        if not self._objects_interactive():
+            return None
         from ..view.object_layer_item import handle_hit_arrow
         box = self._obj_selection_box()
         objs = self.scene.selected_objects
@@ -3637,6 +3713,16 @@ class MainWindow(QMainWindow):
         objs = list(self.scene.selected_objects)
         if objs:
             self.trigger_graph_dock.select_objects(objs)
+        if not moved and objs:
+            # 纯点选（没拖动）：跨层选中时明确告诉用户选中了哪个层的对象。
+            # Ground 层点 Triggers 对象如果没有任何反馈，用户会以为「点了没反应」。
+            owner = self._object_layer_of(self.state.doc, objs[0])
+            cur = self.state.current_layer
+            if owner is not None and owner is not cur:
+                self.statusBar().showMessage(
+                    f"已选中 {owner.name} 的对象「{objs[0].name}」"
+                    "（可拖动 / 拖箭头缩放 / Delete 删除）")
+                return
         self.statusBar().showMessage(
             f"移动 {len(drag['objs'])} 个对象"
             + ("（Ctrl+Z 可撤销）" if pushed else "（位置未变）"))
@@ -3655,7 +3741,8 @@ class MainWindow(QMainWindow):
             layer = self._object_layer_of(doc, o)
             if layer is not None and layer not in seen:
                 seen.append(layer)
-                self.scene.refresh_object_rects(layer, rects)
+                self.scene.refresh_object_rects(
+                    layer, rects, list(objs) + [None] * len(extra_rects))
                 layer.dirty = True
         doc.dirty = True
         self._update_title()
