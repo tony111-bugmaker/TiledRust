@@ -46,7 +46,10 @@ TEXT_DIM = "#8a8a8a"  # 次要文字 / 提示
 TEXT_ON_ACCENT = "#1e1e1e"   # 压在 ASH 亮块上的文字
 
 # ---- 派生的 QColor 工厂 ----
-from PySide6.QtGui import QColor  # noqa: E402  （放在常量之后便于阅读）
+from PySide6.QtGui import QColor, QPen  # noqa: E402  （放在常量之后便于阅读）
+from PySide6.QtWidgets import (  # noqa: E402
+    QAbstractSpinBox, QProxyStyle, QStyle,
+)
 
 
 def qc(value: str, alpha: int | None = None) -> QColor:
@@ -95,6 +98,44 @@ QToolTip {{
     border: 1px solid {INK}; padding: 3px 5px;
 }}
 
+/* 分组框：Qt 原生样式画的是系统浅灰，统一成调色板里的暗灰 ASH。
+   2026-11-23 起所有「这样的边框」都用 ASH，新增对话框自动继承这条规则。 */
+QGroupBox {{
+    background: transparent;
+    border: 1px solid {ASH};
+    border-radius: 3px;
+    margin-top: 8px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 8px; padding: 0 3px;
+    color: {TEXT};
+}}
+
+/* 输入框 / 按钮 / 列表的边框（含获得焦点时的系统亮蓝框）。
+   Windows11 样式直接画亮蓝焦点框，QPalette 管不到；给控件自身设 1px ASH
+   边框后 QStyleSheetStyle 会接管绘制，蓝框消失。写在应用级，以后新增的
+   对话框 / 控件自动继承；面板已有自己的局部样式时仍以局部样式为准。
+
+   2026-11-23 两个血泪坑（务必别再改回去）：
+   1. 必须显式写 color，否则样式表接管绘制后用调色板 Text（系统黑），
+      深底上就是「黑字看不见」——值其实都在，只是看不见。
+   2. 绝不能把 QAbstractSpinBox 加进这组选择器：Qt 6.12 Windows11 样式下，
+      给 NoButtons 数字框设 border/border-radius 会把它内部 QLineEdit 压成
+      1px 宽，同样「值在但看不见」。数字框焦点框改由 _FocusStyle 处理。 */
+QLineEdit, QComboBox, QTextEdit, QPlainTextEdit,
+QListWidget, QTreeWidget, QTableView, QPushButton, QToolButton {{
+    color: {TEXT};
+    border: 1px solid {ASH};
+    border-radius: 3px;
+}}
+QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus,
+QListWidget:focus, QTreeWidget:focus, QTableView:focus,
+QPushButton:focus, QToolButton:focus {{
+    border: 1px solid {ASH};
+}}
+
 QScrollBar:vertical {{ background: {INK}; width: 12px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: {ASH}; min-height: 20px; }}
 QScrollBar:horizontal {{ background: {INK}; height: 12px; margin: 0; }}
@@ -113,12 +154,38 @@ QDockWidget::title {{ background: {ASH}; color: {TEXT}; padding: 3px; }}
 """
 
 
+class _FocusStyle(QProxyStyle):
+    """全局样式代理：把数字框的亮蓝焦点框换成 1px ASH 描边。
+
+    QSS 不能用来改数字框边框——见 APP_QSS 里的注释（NoButtons 会把内部
+    行编辑压成 1px）。Windows11 样式在 CC_SpinBox 里直接画蓝框，连
+    QPalette 都不看，只能在这里把焦点 / 悬停状态摘掉再自己补暗灰描边。
+    """
+
+    def drawComplexControl(self, control, option, painter, widget=None):
+        focused = bool(option.state & QStyle.State_HasFocus)
+        if isinstance(widget, QAbstractSpinBox):
+            option.state = option.state & ~QStyle.State_HasFocus
+            option.state = option.state & ~QStyle.State_MouseOver
+        super().drawComplexControl(control, option, painter, widget)
+        if focused and isinstance(widget, QAbstractSpinBox):
+            painter.save()
+            painter.setPen(QPen(qc(ASH), 1))
+            painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
+            painter.restore()
+
+
 def apply_app_theme(app) -> None:
-    """把应用级样式表装到 QApplication 上。
+    """把应用级样式表和焦点样式代理装到 QApplication 上。
 
     菜单栏、状态栏、分隔条这些**原生部件**不吃各面板自己设的样式表，
     必须在这里统一接管，否则会漏出系统默认的浅色 / 白色。
+    输入框 / 按钮的焦点框也统一压成暗灰 ASH，新增控件自动跟随。
     """
+    if getattr(app, "_rw_focus_style", None) is None:
+        proxy = _FocusStyle(app.style())
+        app.setStyle(proxy)
+        app._rw_focus_style = proxy
     app.setStyleSheet(APP_QSS)
 
 

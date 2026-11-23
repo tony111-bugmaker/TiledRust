@@ -19,8 +19,10 @@ import re
 import unittest
 from pathlib import Path
 
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import (
+    QApplication, QLineEdit, QSpinBox, QStyleFactory,
+)
 
 from rwmap.theme import (
     APP_QSS, ASH, INK, PANEL_BORDER_COLOR, PANEL_BORDER_PX, TEXT, TEXT_DIM,
@@ -94,6 +96,101 @@ class ThemeConstantTest(unittest.TestCase):
             for c in re.findall(r"#[0-9a-fA-F]{6}\b", value):
                 self.assertIn(_norm(c), {TEXT.lower(), TEXT_DIM.lower()},
                               f"应用样式表出现意外的文字色：{c}")
+
+    def test_group_and_focus_borders_use_ash(self):
+        """分组框与输入控件焦点框统一用 ASH，不出现系统浅灰 / 亮蓝。"""
+        group = re.search(r"QGroupBox\s*\{([^}]*)\}", APP_QSS)
+        self.assertIsNotNone(group, "缺少 QGroupBox 边框规则")
+        self.assertIn(f"border: 1px solid {ASH}", group.group(1))
+        focus = re.search(r"QLineEdit:focus[^{]*\{([^}]*)\}",
+                          APP_QSS, re.S)
+        self.assertIsNotNone(focus, "缺少输入控件焦点边框规则")
+        self.assertIn(f"border: 1px solid {ASH}", focus.group(1))
+        self.assertIn("color: " + TEXT, APP_QSS,
+                      "样式表接管绘制后必须显式给文字色，否则黑字看不见")
+        # Qt 6.12 Windows11：给 NoButtons 数字框设 QSS 边框会把内部
+        # QLineEdit 压成 1px，2026-11-23 踩过，绝不能加回来。
+        qss_no_comments = re.sub(r"/\*.*?\*/", "", APP_QSS, flags=re.S)
+        self.assertNotIn("QAbstractSpinBox", qss_no_comments,
+                         "数字框不能走 QSS 边框规则，改由 _FocusStyle 处理")
+        for bright in ("#a6a6a6", "#4cc2ff", "#0078d4"):
+            self.assertNotIn(bright, APP_QSS.lower(),
+                             f"应用样式表仍有亮色边框 {bright}")
+
+
+class FocusBorderPixelTest(unittest.TestCase):
+    """Windows11 样式下焦点蓝框由 QStyle 画，必须用像素级用例锁住。"""
+
+    @staticmethod
+    def _use_style(app, name):
+        # QStyle 对象由 QApplication 持有，切走后原对象会被释放；存名字再恢复。
+        # 换样式必须清掉代理标记，否则 apply_app_theme 不会重新装代理。
+        app.setStyle(QStyleFactory.create(name))
+        app._rw_focus_style = None
+        apply_app_theme(app)
+
+    @staticmethod
+    def _pixels(widget):
+        img = widget.grab().toImage()
+        blue = light = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                r, g, b, _ = img.pixelColor(x, y).getRgb()
+                if b > 90 and b - r > 35 and b - g > 20:
+                    blue += 1
+                if r > 140 and g > 140 and b > 140:
+                    light += 1
+        return blue, light
+
+    def test_windows11_focus_border_not_blue(self):
+        app = QApplication.instance() or QApplication([])
+        old_name = app.style().objectName() or "fusion"
+        try:
+            self._use_style(app, "windows11")
+            spin = QSpinBox()
+            spin.resize(200, 32)
+            spin.show()
+            spin.setFocus()
+            app.processEvents()
+            blue, _ = self._pixels(spin)
+            self.assertLess(blue, 80, "Windows11 样式下仍画出大片亮蓝焦点框")
+        finally:
+            self._use_style(app, old_name)
+
+    def test_nobutton_spinbox_text_visible(self):
+        """回归：NoButtons 数字框内部行编辑被压成 1px 会导致「值在但看不见」。"""
+        from rwmap.widgets.plain_spinbox import PlainSpinBox
+
+        app = QApplication.instance() or QApplication([])
+        old_name = app.style().objectName() or "fusion"
+        old_palette = app.palette()
+        try:
+            self._use_style(app, "windows11")
+            pal = app.palette()
+            R = QPalette.ColorRole
+            for role in (R.Base, R.Window, R.AlternateBase):
+                pal.setColor(role, QColor(INK))
+            app.setPalette(pal)
+
+            spin = PlainSpinBox()
+            spin.setRange(1, 1000)
+            spin.setValue(64)
+            spin.setSuffix(" 块")
+            spin.resize(200, 32)
+            spin.show()
+            spin.setFocus()
+            app.processEvents()
+
+            line_edit = spin.findChild(QLineEdit)
+            self.assertIsNotNone(line_edit)
+            self.assertGreater(line_edit.width(), 100,
+                               "内部行编辑被压扁，数值看不见")
+            blue, light = self._pixels(spin)
+            self.assertLess(blue, 80, "数字框仍有大片亮蓝焦点框")
+            self.assertGreater(light, 0, "深色输入框里看不到文字")
+        finally:
+            app.setPalette(old_palette)
+            self._use_style(app, old_name)
 
 
 def _lum(hex_color: str) -> float:

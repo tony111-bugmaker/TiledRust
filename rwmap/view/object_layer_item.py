@@ -60,7 +60,11 @@ _CACHE_MAX_SIDE = 4096
 # 每帧逐对象绘制（实测缩放 0.25 时 208ms/帧）。分块后只渲染视口相交的块，
 # 缓存命中帧降到 ~5ms。
 _TILE_CACHE = 640.0                    # 每块场景边长
-_TILE_CACHE_MAX = 256                  # 块缓存上限（LRU 淘汰）
+_TILE_CACHE_MAX = 4096                 # 块数兜底上限（真正约束是字节预算）
+# 低 LOD 一块只有 80x80x4=25KB；真实图缩到 0.05 时视口要 988 块，
+# 固定 256 块上限会边建边淘汰，永远铺不满 → 肉眼看到「从上往下加载」。
+# 改为按字节预算淘汰：低 LOD 可缓存数千块，高 LOD 仍受内存预算约束。
+_TILE_CACHE_MAX_BYTES = 96 * 1024 * 1024
 _TILE_LODS = (1.0, 0.5, 0.25, 0.125)   # 与瓦片层 LOD 档位一致
 _TILE_CACHE_MIN_SPAN = 4200.0          # 跨度超此值才启用分块（单图上限 4096）
 
@@ -76,6 +80,12 @@ _ASYNC_TILES = True
 # 每帧快照本身就在 GUI 线程，派发太多会让主线程快照与 worker 抢 CPU/带宽。
 _TILE_POOL_MAX = 2
 _TILE_MAX_JOBS_PER_FRAME = 2
+# 缩小到这个倍率以下时，每帧派发更多块：低 LOD 每块只有 80x80 像素、
+# 快照/建块实测中位数 0.02~0.03ms，2 块/帧会让 988 块视口铺十几秒。
+_TILE_FAST_DISPATCH_SCALE = 0.25
+_TILE_MAX_JOBS_PER_FRAME_LOW = 8
+# 全图对象框占位图：新建块未就绪时先贴这张低清整图，避免「从上往下逐块空白」。
+_OVERVIEW_MAX_SIDE = 1024
 
 _HALIGN = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
            "right": Qt.AlignRight, "justify": Qt.AlignJustify}
@@ -587,6 +597,7 @@ class ObjectLayerItem(QGraphicsItem):
         # 固定网格，缩放只切 LOD 档，平移复用已有块。
         self._tile_cache: dict = {}
         self._tile_lru: list = []          # 最近使用的 key，超限淘汰
+        self._tile_bytes: int = 0          # 当前缓存占用（字节）
         self._tile_labels: bool = True     # 缓存块里是否烘焙了标签
         self._tile_dirty_all: bool = False # 增删后置位，下帧清空重建
         self._tile_span: float | None = None
@@ -597,6 +608,10 @@ class ObjectLayerItem(QGraphicsItem):
         self._tile_epoch: int = 0
         self._tile_inflight: dict = {}     # key -> 发起时的 epoch
         self._tile_bridge: _TileResultBridge | None = None  # 惰性创建（GUI 线程）
+        # 低清全图占位：缩小时新建块未就绪先贴它，边框不会从上往下逐块冒出来。
+        self._tile_overview: QImage | None = None
+        self._tile_overview_rect = QRectF()
+        self._tile_overview_lod = 0.0
         self.setZValue(z_value)
         self.setOpacity(layer.opacity)
         self.setVisible(layer.visible)
@@ -912,23 +927,42 @@ class ObjectLayerItem(QGraphicsItem):
                            entries=entries, images=images,
                            show_labels=show_labels)
         img = build_tile_image(job)
-        self._tile_cache[key] = img
+        self._put_tile(key, img)
         self._tile_labels = show_labels
-        if key not in self._tile_lru:
-            self._tile_lru.append(key)
-        self._evict_tiles()
         return img
 
+    @staticmethod
+    def _tile_bytes_of(img) -> int:
+        return img.width() * img.height() * 4   # Format_ARGB32
+
+    def _clear_tile_cache(self):
+        self._tile_cache.clear()
+        self._tile_lru.clear()
+        self._tile_bytes = 0
+
+    def _put_tile(self, key, img):
+        old = self._tile_cache.get(key)
+        if old is not None:
+            self._tile_bytes -= self._tile_bytes_of(old)
+        self._tile_cache[key] = img
+        self._tile_bytes += self._tile_bytes_of(img)
+        self._touch_tile_lru(key)
+        self._evict_tiles()
+
     def _evict_tiles(self):
-        while len(self._tile_cache) > _TILE_CACHE_MAX:
-            old = self._tile_lru.pop(0) if self._tile_lru else next(iter(self._tile_cache))
-            self._tile_cache.pop(old, None)
+        while (self._tile_bytes > _TILE_CACHE_MAX_BYTES
+               or len(self._tile_cache) > _TILE_CACHE_MAX):
+            if not self._tile_lru:
+                break
+            old = self._tile_lru.pop(0)
+            img = self._tile_cache.pop(old, None)
+            if img is not None:
+                self._tile_bytes -= self._tile_bytes_of(img)
 
     def _paint_tile_cache(self, painter, visible: QRectF, show_labels: bool):
         """分块缓存路径：逐块 drawImage，块内只渲染视口相交的对象。"""
         if self._tile_dirty_all:
-            self._tile_cache.clear()
-            self._tile_lru.clear()
+            self._clear_tile_cache()
             self._tile_dirty_all = False
         lod = _choose_tile_lod(self._scale)
         for bx, by in self._tile_key_range(visible, lod):
@@ -956,19 +990,65 @@ class ObjectLayerItem(QGraphicsItem):
         """任何失效都递增代次并作废在途任务，防止旧结果回来画错。"""
         self._tile_epoch += 1
         self._tile_inflight.clear()
+        self._tile_overview = None   # 对象变了，低清占位图也必须重建
+
+    def _ordered_tile_keys(self, visible: QRectF, lod: float):
+        """低倍率下按「离视口中心由近及远」派发，视觉上从中心向外变清晰。"""
+        keys = self._tile_key_range(visible, lod)
+        if self._scale > _TILE_FAST_DISPATCH_SCALE or len(keys) < 2:
+            return keys
+        center = visible.center()
+        cx = center.x() / _TILE_CACHE
+        cy = center.y() / _TILE_CACHE
+        return sorted(keys, key=lambda k:
+                      (k[0] + 0.5 - cx) ** 2 + (k[1] + 0.5 - cy) ** 2)
+
+    def _build_tile_overview(self):
+        """生成整张对象范围的低清 QImage，仅作未就绪块的占位。
+
+        与高分块同样用「缩放 painter + ceil(1/lod) 线宽补偿」，保证
+        drawImage 放回场景后线宽与直接绘制接近；不烘焙标签（低倍率下
+        标签本就隐藏），也不含选中态（选中态每帧单独覆盖）。
+        """
+        b = self._cache_bounds()
+        if b.isEmpty():
+            return
+        span = max(b.width(), b.height())
+        lod = min(_TILE_LODS[-1], _OVERVIEW_MAX_SIDE / span)
+        w = max(1, int(math.ceil(b.width() * lod)))
+        h = max(1, int(math.ceil(b.height() * lod)))
+        img = QImage(w, h, QImage.Format_ARGB32)
+        img.fill(Qt.transparent)
+        p = QPainter(img)
+        p.scale(lod, lod)
+        p.translate(-b.left(), -b.top())
+        line_w = max(1, int(math.ceil(1.0 / lod)))
+        for obj in self.layer.objects:
+            if getattr(obj, "visible", True):
+                _paint_object_pure(p, obj, self.doc, is_selected=False,
+                                   show_label=False, line_width=line_w)
+        p.end()
+        self._tile_overview = img
+        self._tile_overview_rect = b
+        self._tile_overview_lod = lod
 
     def _paint_tile_cache_async(self, painter, visible: QRectF, show_labels: bool):
         """异步建块：命中块直接贴，未命中派发到线程池，仅贴已就绪的块。"""
         if self._tile_dirty_all:
             self._bump_tile_epoch()
-            self._tile_cache.clear()
-            self._tile_lru.clear()
+            self._clear_tile_cache()
             self._tile_dirty_all = False
         lod = _choose_tile_lod(self._scale)
         if self._tile_bridge is None:
             self._tile_bridge = _TileResultBridge(self)   # GUI 线程构造
+        # 低倍率：一次性生成低清全图占位，未就绪块先贴它，避免空白逐块下移。
+        use_overview = self._scale <= _TILE_FAST_DISPATCH_SCALE
+        if use_overview and self._tile_overview is None:
+            self._build_tile_overview()
+        max_jobs = (_TILE_MAX_JOBS_PER_FRAME_LOW if use_overview
+                    else _TILE_MAX_JOBS_PER_FRAME)
         dispatched = 0
-        for bx, by in self._tile_key_range(visible, lod):
+        for bx, by in self._ordered_tile_keys(visible, lod):
             key = (lod, bx, by)
             rect = QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
                           _TILE_CACHE, _TILE_CACHE)
@@ -977,11 +1057,23 @@ class ObjectLayerItem(QGraphicsItem):
                 painter.drawImage(rect, img, QRectF(0, 0, img.width(), img.height()))
                 self._touch_tile_lru(key)
                 continue
-            # 未就绪：这一帧留空（渐进填充），下帧结果回来会 update 触发重绘。
+            # 未就绪：低倍率先贴低清整图对应区域，边框从第一帧就完整可见；
+            # 高倍率保持原来的短暂留空（块大、数量少，几帧即铺满）。
+            if use_overview and self._tile_overview is not None:
+                ov = self._tile_overview
+                ov_rect = self._tile_overview_rect
+                hit = rect.intersected(ov_rect)
+                if not hit.isEmpty():
+                    ol = self._tile_overview_lod
+                    src = QRectF(
+                        (hit.left() - ov_rect.left()) * ol,
+                        (hit.top() - ov_rect.top()) * ol,
+                        hit.width() * ol, hit.height() * ol)
+                    painter.drawImage(hit, ov, src)
             self.update(rect)
             if key in self._tile_inflight:
                 continue
-            if dispatched >= _TILE_MAX_JOBS_PER_FRAME:
+            if dispatched >= max_jobs:
                 continue
             entries, images = self._snapshot_tile_entries(bx, by, show_labels,
                                                           for_async=True)
@@ -1012,10 +1104,8 @@ class ObjectLayerItem(QGraphicsItem):
             self.update(QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
                                _TILE_CACHE, _TILE_CACHE))
             return
-        self._tile_cache[result.key] = result.image
+        self._put_tile(result.key, result.image)
         self._tile_labels = result.show_labels
-        self._touch_tile_lru(result.key)
-        self._evict_tiles()
         lod, bx, by = result.key
         self.update(QRectF(bx * _TILE_CACHE, by * _TILE_CACHE,
                            _TILE_CACHE, _TILE_CACHE))
@@ -1034,7 +1124,9 @@ class ObjectLayerItem(QGraphicsItem):
         for key in list(self._tile_cache):
             _lod, bx, by = key
             if x0 <= bx <= x1 and y0 <= by <= y1:
-                self._tile_cache.pop(key, None)
+                img = self._tile_cache.pop(key, None)
+                if img is not None:
+                    self._tile_bytes -= self._tile_bytes_of(img)
                 try:
                     self._tile_lru.remove(key)
                 except ValueError:

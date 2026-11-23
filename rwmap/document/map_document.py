@@ -111,7 +111,7 @@ class MapDocument:
 # mapText / info 等配置说明类节点也加上无意义的 id 属性（后者不会被 alsoActivate
 # 引用，强加 id 还会污染「未编辑文档写回字节一致」的保证）。
 RW_TRIGGER_TYPES = {
-    "unitAdd", "unitDetect", "unitRemove", "changeCredits", "move",
+    "unitAdd", "unitAddRandom", "unitDetect", "unitRemove", "changeCredits", "move",
     "point", "basic", "camera_pan", "rotate", "moveCamera", "objective",
     "set_team", "ai_allow_full_use",
 }

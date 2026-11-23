@@ -424,10 +424,24 @@ class AutoMapper:
         self.errors: list[str] = []
         self._index_cache = None
         self._index_rules_ref = None
+        # 图案索引：规则输入几乎全在 set 层，把「锚点 gid + 邻域图案」预建成
+        # 哈希表，实时绘制/填充时一次查表命中适用规则，不再逐条规则试匹配。
+        self._fast_index_cache = None
+        self._fast_rules_ref = None
         # 图集首格 -> 规则认可的规范标记 gid（由规则派生，见 _derive_canonical_markers）
         self.canonical_marker_gids: dict[int, int] = {}
         #  gid 空间投影缓存：key=工作地图图集布局签名，value=投影后的规则列表。
         self._projected_cache: dict[tuple, list[Rule]] = {}
+        # 「图集名 -> 规范标记相对索引」只依赖已加载规则与规范标记；绘制时
+        # 每格都会算一次标记归一，缓存后避免逐格重扫全部规则（填充一大片
+        # 水域时这里曾是最大热点）。rules / canonical_marker_gids 引用变化
+        # （load() 重新赋值）即自动失效。
+        self._canon_index_cache: dict[str, int] | None = None
+        self._canon_index_rules_ref = None
+        self._canon_index_gids_ref = None
+        # 工作地图的图集区间同一张地图内不变；逐格归一时复用，换地图按身份失效。
+        self._ranges_doc = None
+        self._ranges_cache: dict[str, list[tuple[int, int]]] | None = None
 
     # ---------------- 加载规则 ----------------
     def load(self) -> dict:
@@ -440,7 +454,13 @@ class AutoMapper:
         """
         self.rules, self.rule_files, self.errors = [], [], []
         self._index_cache = None
+        self._fast_index_cache = None
         self._projected_cache = {}
+        self._canon_index_cache = None
+        self._canon_index_rules_ref = None
+        self._canon_index_gids_ref = None
+        self._ranges_doc = None
+        self._ranges_cache = None
         if not self.rules_file.is_file():
             return {"ok": False, "error": f"规则索引不存在: {self.rules_file}"}
         self._load_rules_txt(self.rules_file, visited=set(), active_filter="*")
@@ -899,6 +919,10 @@ class AutoMapper:
         canonical_marker_gids 是「规则图首格 -> 规范标记」，结合规则的
         source_tilesets 可换算出「图集名 -> 规范相对索引」（Lava 为 4）。
         """
+        if (self._canon_index_cache is not None
+                and self._canon_index_rules_ref is self.rules
+                and self._canon_index_gids_ref is self.canonical_marker_gids):
+            return self._canon_index_cache
         result: dict[str, int] = {}
         seen: set[tuple[str, int]] = set()
         for rule in self.rules:
@@ -911,6 +935,9 @@ class AutoMapper:
                     result.setdefault(name, 0)
                 else:
                     result[name] = canonical - first
+        self._canon_index_cache = result
+        self._canon_index_rules_ref = self.rules
+        self._canon_index_gids_ref = self.canonical_marker_gids
         return result
 
     def normalize_marker(self, doc, raw: int) -> int:
@@ -926,7 +953,10 @@ class AutoMapper:
             gid = raw_int & GID_MASK
             flags = raw_int & ~GID_MASK
             if gid:
-                for name, ranges in _doc_tileset_ranges(doc).items():
+                if self._ranges_doc is not doc or self._ranges_cache is None:
+                    self._ranges_cache = _doc_tileset_ranges(doc)
+                    self._ranges_doc = doc
+                for name, ranges in self._ranges_cache.items():
                     if " - " in name or name in ("units", "misc"):
                         continue
                     first = _gid_in_ranges(gid, ranges)
@@ -951,6 +981,57 @@ class AutoMapper:
         self._index_cache = (index, loose)
         self._index_rules_ref = rules
         return self._index_cache
+
+    def _fast_index(self, rules=None):
+        """按「锚点gid → 相对邻域形状 → 期望图案 → 规则」预建查表。
+
+        只对输入全部读 set 层（或固定 0 的 None 层）、无 any/none/wildcard/
+        border/skip 的简单规则启用。官方 274 条规则里 267 条走这条快路。
+        只要存在读其它层或写 set 层的规则就整体关闭，避免 MatchInOrder
+        的 overlay 语义受影响。
+
+        返回 ``(bucket, fast_ids)``：bucket[锚点gid][形状][图案] = 规则列表。
+        """
+        rules = self.rules if rules is None else rules
+        if (self._fast_index_cache is not None
+                and self._fast_rules_ref is rules):
+            return self._fast_index_cache
+        bucket: dict = {}
+        fast_ids: set[int] = set()
+
+        safe = True
+        for r in rules:
+            if "set" in r.outputs:
+                safe = False
+                break
+            targets = ([t for *_, t in r.inputs]
+                       + [s[3] for s in r.any_of]
+                       + [s[3] for s in r.none_of]
+                       + [t for _, _, t in r.wildcards])
+            if any(t not in (None, "set") for t in targets):
+                safe = False
+                break
+        if safe:
+            for rule in rules:
+                anchor = rule.anchor
+                if (anchor is None or rule.disabled or rule.skip_chance > 0
+                        or rule.border or rule.any_of or rule.none_of
+                        or rule.ignore_cells or rule.negate or rule.wildcards
+                        or rule.inputnots or not rule.inputs
+                        or any(t != "set" for _, _, _, t in rule.inputs)):
+                    continue
+                adx, ady, gid = anchor[:3]
+                ordered = sorted(rule.inputs,
+                                 key=lambda it: (it[0] - adx, it[1] - ady))
+                shape = tuple((it[0] - adx, it[1] - ady) for it in ordered)
+                pattern = tuple(int(it[2]) & GID_MASK for it in ordered)
+                bucket.setdefault(gid, {}).setdefault(shape, {}) \
+                      .setdefault(pattern, []).append(rule)
+                fast_ids.add(id(rule))
+
+        self._fast_index_cache = (bucket, fast_ids)
+        self._fast_rules_ref = rules
+        return self._fast_index_cache
 
     def compute(self, doc, area: tuple[int, int, int, int] | None = None,
                 radius: int | None = None, only_diff: bool = True,
@@ -980,6 +1061,7 @@ class AutoMapper:
             reset_base = local
 
         index, loose = self._index(rules)
+        fast_bucket, fast_ids = self._fast_index(rules)
         base_gids = _base_gids(doc)
         result: dict[tuple[str, int, int], int] = {}
         winners: dict[tuple[str, int, int], tuple] = {}
@@ -996,17 +1078,26 @@ class AutoMapper:
         import random as _random
         _variant_rng = _random.Random(self.random_seed)
 
+        variant_cache: dict[int, int] = {}
+        empty_out_cache: dict[int, set] = {}
+
         def _pick_variant(rule) -> int:
+            rid = id(rule)
+            if rid in variant_cache:
+                return variant_cache[rid]
             n = max((len(v) for v in rule.outputs.values()), default=0)
             if n <= 1 or not self.random_variants:
-                return 0
-            weights = rule.variant_weights[:n] or [1.0] * n
-            # 用规则名派生子随机源，保证不同规则独立且整体可复现。
-            # 注意不能用内置 hash()（PYTHONHASHSEED 随机化会破坏复现）。
-            import zlib
-            rule_key = zlib.crc32(str(rule.order).encode("utf-8"))
-            sub = _random.Random(rule_key ^ (self.random_seed or 0))
-            return sub.choices(range(n), weights=weights, k=1)[0]
+                chosen = 0
+            else:
+                weights = rule.variant_weights[:n] or [1.0] * n
+                # 用规则名派生子随机源，保证不同规则独立且整体可复现。
+                # 注意不能用内置 hash()（PYTHONHASHSEED 随机化会破坏复现）。
+                import zlib
+                rule_key = zlib.crc32(str(rule.order).encode("utf-8"))
+                sub = _random.Random(rule_key ^ (self.random_seed or 0))
+                chosen = sub.choices(range(n), weights=weights, k=1)[0]
+            variant_cache[rid] = chosen
+            return chosen
 
         def _put(key, gid, order=()):
             # 同一格被多条规则写时，按规则在规则图里的固定顺序决定胜负。
@@ -1127,7 +1218,7 @@ class AutoMapper:
                     return False
             return True
 
-        def _apply_rule(rule, ox, oy):
+        def _apply_rule(rule, ox, oy, matched=False):
             if rule.disabled:
                 return
             # Probability：以 skipChance 概率跳过本次应用（Tiled 语义）。
@@ -1140,7 +1231,7 @@ class AutoMapper:
             ay = oy - rule.offset_y
             if ax % rule.mod_x or ay % rule.mod_y:
                 return
-            if not _matches(rule, ox, oy):
+            if not matched and not _matches(rule, ox, oy):
                 return
             # NoOverlappingRules：若本次应用的输出区与同规则已应用区重叠则跳过。
             if rule.no_overlapping:
@@ -1157,9 +1248,12 @@ class AutoMapper:
                         cleared.add((target, ox + dx, oy + dy))
             # 输出坐标已相对输入区域原点（含 regions_output 的偏移），
             # 只写重算窗口内的格子：局部绘制不会越界扩散。
-            empty_out = set()
-            if rule.explicit_empty_outputs:
-                empty_out = {(t, dx, dy) for t, dx, dy in rule.explicit_empty_outputs}
+            rid = id(rule)
+            empty_out = empty_out_cache.get(rid)
+            if empty_out is None:
+                empty_out = ({(t, dx, dy) for t, dx, dy in rule.explicit_empty_outputs}
+                             if rule.explicit_empty_outputs else set())
+                empty_out_cache[rid] = empty_out
             chosen = _pick_variant(rule)
             for target, variants in rule.outputs.items():
                 variant_cells = variants[chosen] if chosen < len(variants) else variants[0]
@@ -1173,6 +1267,35 @@ class AutoMapper:
                             out_layer = _layer(target)
                             if out_layer is not None:
                                 overlay[(id(out_layer), x, y)] = out_gid
+
+        # 图案快路：一次查表得到该邻域真正适用的规则，省掉「逐条规则试匹配」。
+        # 只在 _fast_index 判定 overlay 不参与匹配时启用，语义与慢路完全一致。
+        set_cells = set_layer.cells
+        doc_w, doc_h = doc.width, doc.height
+
+        def _fast_apply(x, y):
+            base = y * doc_w + x
+            bucket = fast_bucket.get(int(set_cells[base]) & GID_MASK)
+            if not bucket:
+                return
+            for shape, patterns in bucket.items():
+                values = []
+                for dx, dy in shape:
+                    nx, ny = x + dx, y + dy
+                    if not (0 <= nx < doc_w and 0 <= ny < doc_h):
+                        break                     # 越界按旧语义 _read 返回 None，不匹配
+                    values.append(int(set_cells[base + dy * doc_w + dx]) & GID_MASK)
+                else:
+                    for rule in patterns.get(tuple(values), ()):
+                        ax, ay = rule.anchor[:2]
+                        ox, oy = x - ax, y - ay
+                        if (x + rule.max_rx < w0 or x + rule.min_rx > w1
+                                or y + rule.max_ry < h0 or y + rule.min_ry > h1):
+                            continue
+                        if (ox < 0 or oy < 0 or ox + rule.w > doc_w
+                                or oy + rule.h > doc_h):
+                            continue
+                        _apply_rule(rule, ox, oy, matched=True)
 
         # 锚点在窗口外、但输出落到窗口内的规则也要跑到，因此四周都外扩。
         margin = max(4, max((r.w for r in rules), default=1),
@@ -1188,10 +1311,14 @@ class AutoMapper:
             anchor_positions: dict[int, list[tuple[int, int]]] = defaultdict(list)
             for y in range(sy0, sy1 + 1):
                 for x in range(sx0, sx1 + 1):
+                    if fast_bucket:
+                        _fast_apply(x, y)
                     gid = _read(set_layer, x, y)
                     if gid is not None:
                         anchor_positions[gid].append((x, y))
             for rule in sorted(rules, key=lambda r: r.order):
+                if id(rule) in fast_ids:
+                    continue                      # 已由图案快路应用
                 anchor = rule.anchor
                 if anchor is not None:
                     for x, y in anchor_positions.get(anchor[2], ()):
@@ -1211,10 +1338,14 @@ class AutoMapper:
             # 默认并发匹配（官方规则图走这里，实测 100% 复现率）。
             for y in range(sy0, sy1 + 1):
                 for x in range(sx0, sx1 + 1):
+                    if fast_bucket:
+                        _fast_apply(x, y)
                     gid = _read(set_layer, x, y)
                     if gid is None:
                         continue
                     for rule, dx0, dy0 in index.get(gid, ()):
+                        if id(rule) in fast_ids:
+                            continue              # 已由图案快路应用
                         # 该规则的输出够不到重算窗口就跳过，实时绘制时省掉绝大多数匹配。
                         if (x + rule.max_rx < w0 or x + rule.min_rx > w1
                                 or y + rule.max_ry < h0 or y + rule.min_ry > h1):

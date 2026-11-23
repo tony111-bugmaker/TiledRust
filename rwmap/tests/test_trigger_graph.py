@@ -626,12 +626,18 @@ class GraphDockTest(unittest.TestCase):
         dock = self._setup()
         item = next(iter(dock.edge_items))
         import inspect
-        src = inspect.getsource(type(item).paint)
-        self.assertIn("setCosmetic(True)", src,
-                      "EdgeItem 连线笔宽必须 cosmetic，缩放才不变粗/细")
-        # 全局连线层的贝塞尔同样 cosmetic
-        from rwmap.widgets.trigger_graph_dock import _paint_edge_curve
-        self.assertIn("setCosmetic(True)", inspect.getsource(_paint_edge_curve))
+        from rwmap.widgets.trigger_graph_dock import (
+            _edge_color, _edge_resources, _paint_edge_curve,
+        )
+        # 笔宽创建集中到 _edge_resources（避免每帧几千次 setCosmetic）
+        self.assertIn("setCosmetic(True)", inspect.getsource(_edge_resources))
+        pen = _edge_resources(item._color)[1]
+        self.assertTrue(pen.isCosmetic(),
+                        "EdgeItem 连线笔宽必须 cosmetic，缩放才不变粗/细")
+        self.assertTrue(_edge_resources(_edge_color(item.kind))[1].isCosmetic(),
+                        "全局连线层的贝塞尔笔宽也必须 cosmetic")
+        # 两条绘制路径都从同一份 cosmetic 资源取笔
+        self.assertIn("_edge_resources(", inspect.getsource(_paint_edge_curve))
 
     def test_overview_box_draws_above_edges(self):
         """缩小概览：节点色块 z 必须高于全局连线层（矩形在线条之上）。"""
@@ -1468,6 +1474,38 @@ class GraphSelectionAndContextMenuTest(unittest.TestCase):
         self.assertEqual(dock._selected_keys, set())
         self.assertEqual(len(dock.data.nodes), 0)
 
+    def test_right_click_blank_cancels_selection_and_no_menu(self):
+        """右键空白处（无选区）= 取消选择，且绝不弹节点菜单。"""
+        from PySide6.QtCore import QEvent, QPointF, QRectF
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QGraphicsRectItem
+
+        dock = self._setup()
+        keys = list(dock.data.nodes)
+        # 先制造一个选中态（模拟框选后右键空白的旧场景）
+        dock._selected_keys = {keys[0]}
+        dock.node_items[keys[0]].setSelected(True)
+        self.assertTrue(dock._selected_keys)
+
+        # 构造一个零选区的右键 band（单击空白，不拖拽）
+        band = QGraphicsRectItem(QRectF(10, 10, 0, 0))
+        dock.scene.addItem(band)
+        dock.view._band = band
+
+        ev = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(10, 10),
+                         Qt.RightButton, Qt.RightButton, Qt.NoModifier)
+        shown = []
+
+        class _Menu:
+            def exec(self, _pos): shown.append(_pos)
+
+        with patch.object(dock, "node_context_menu", return_value=_Menu()):
+            dock.view.mouseReleaseEvent(ev)
+
+        self.assertEqual(shown, [], "右键空白处不应弹出节点菜单")
+        self.assertEqual(dock._selected_keys, set(), "右键空白处应清空数据层选中态")
+        self.assertEqual(dock.scene.selectedItems(), [], "右键空白处应清空场景选中态")
+
     def test_right_click_release_on_node_opens_menu(self):
         """view 关掉系统右键菜单后，必须在鼠标释放时显式弹出节点菜单。"""
         from PySide6.QtCore import QEvent, QPointF
@@ -1513,6 +1551,201 @@ class GraphSelectionAndContextMenuTest(unittest.TestCase):
         self.assertEqual(dock._selected_keys, {keys[0]})
         self.assertIn("exec", shown)
         self.assertIn("accepted", shown)
+
+
+class GraphEdgeRenderCacheTest(unittest.TestCase):
+    """连线几何/资源缓存的回归：加速后必须与逐边重算逐像素一致。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _make(self, n=40):
+        from types import SimpleNamespace
+        from rwmap.widgets.trigger_graph_dock import (
+            EDGE_SPECS, GraphData, GraphEdge, GraphEdgeLayerItem, GraphNode,
+        )
+        kinds = list(EDGE_SPECS)
+
+        class _Obj:
+            def __init__(self, t):
+                self.type_ = t
+
+        nodes, edges, lanes = {}, [], {}
+        for i in range(n):
+            k = f"n{i}"
+            nodes[k] = GraphNode(k, _Obj(kinds[i % len(kinds)]), "L", str(i),
+                                 x=(i % 8) * 260.0, y=(i // 8) * 130.0)
+        for i in range(n - 1):
+            e = GraphEdge(f"n{i}", f"n{i+1}", kinds[i % len(kinds)])
+            edges.append(e)
+            lanes[id(e)] = (i % 3, 3)
+        data = GraphData(nodes=nodes, edges=edges)
+
+        class _View:
+            def __init__(self, z):
+                self.z = z
+
+            def zoom(self):
+                return self.z
+
+            def viewport(self):
+                return None
+
+        def dock(zoom):
+            return SimpleNamespace(data=data, _edge_lanes=lanes,
+                                   _live_edges=set(), _active_cache=set(nodes),
+                                   _overview_item=None, view=_View(zoom))
+
+        return data, lanes, dock, GraphEdgeLayerItem
+
+    def _paint_cached(self, dock, layer_cls):
+        from PySide6.QtGui import QImage, QPainter
+        layer = layer_cls(dock)
+        layer.set_content()
+        img = QImage(900, 600, QImage.Format_ARGB32)
+        img.fill(0)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        layer.paint(p, None)
+        p.end()
+        return img, layer
+
+    def _paint_uncached(self, dock):
+        from PySide6.QtGui import QImage, QPainter
+        from rwmap.widgets.trigger_graph_dock import (
+            _edge_color, _paint_edge_curve,
+        )
+        img = QImage(900, 600, QImage.Format_ARGB32)
+        img.fill(0)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        for e in dock.data.edges:
+            a, b = dock.data.nodes[e.src], dock.data.nodes[e.dst]
+            lane, total = dock._edge_lanes[id(e)]
+            _paint_edge_curve(p, a, b, lane, total, _edge_color(e.kind),
+                              dock.view.zoom(), dock._overview_item is not None)
+        p.end()
+        return img
+
+    def _assert_same_pixels(self, a, b):
+        self.assertEqual(a.size(), b.size())
+        self.assertEqual(bytes(a.constBits()), bytes(b.constBits()),
+                         "缓存路径与逐边重算的渲染结果必须逐像素一致")
+
+    def test_cached_matches_uncached_detail(self):
+        """细节模式：复用曲线/箭头几何不得改变任何像素。"""
+        _data, _lanes, dock, layer_cls = self._make()
+        cached, _ = self._paint_cached(dock(1.0), layer_cls)
+        self._assert_same_pixels(cached, self._paint_uncached(dock(1.0)))
+
+    def test_cached_matches_uncached_overview(self):
+        """概览模式：箭头按 1/zoom 放大的路径也不得改变任何像素。"""
+        _data, _lanes, dock, layer_cls = self._make()
+        d = dock(0.15)
+        d._overview_item = object()      # 触发 overview 分支
+        cached, _ = self._paint_cached(d, layer_cls)
+        self._assert_same_pixels(cached, self._paint_uncached(d))
+
+    def test_geometry_reused_then_rebuilt_on_move(self):
+        """重绘复用曲线；节点移动后只重建与之相连的边。"""
+        import rwmap.widgets.trigger_graph_dock as tg
+        data, _lanes, dock, layer_cls = self._make()
+        d = dock(1.0)
+        layer = layer_cls(d)
+        layer.set_content()
+        from PySide6.QtGui import QImage, QPainter
+
+        def draw():
+            img = QImage(900, 600, QImage.Format_ARGB32)
+            p = QPainter(img)
+            layer.paint(p, None)
+            p.end()
+
+        real = tg._edge_path
+        with patch.object(tg, "_edge_path", wraps=real) as spy:
+            draw()
+            self.assertEqual(spy.call_count, len(data.edges))
+            spy.reset_mock()
+            draw()
+            self.assertEqual(spy.call_count, 0, "节点没动就不该重新构造曲线")
+            data.nodes["n20"].x += 30.0
+            draw()
+            # 链式边：n19->n20、n20->n21 两条受影响
+            self.assertEqual(spy.call_count, 2)
+
+    def test_edge_resources_are_cosmetic_and_reused(self):
+        """连线笔/箭头画刷按颜色缓存，且仍是 cosmetic 笔宽。"""
+        from PySide6.QtGui import QColor
+        from rwmap.widgets.trigger_graph_dock import _edge_resources
+        a = _edge_resources(QColor("#57c878"))
+        b = _edge_resources(QColor("#57c878"))
+        self.assertIs(a[1], b[1])
+        self.assertIs(a[2], b[2])
+        self.assertTrue(a[1].isCosmetic())
+
+    def test_long_curve_clipped_to_viewport_is_pixel_identical(self):
+        """超长曲线只画视口内一段：视口内每个像素必须与画整条完全一致。
+
+        真实图的连线跨度中位数 3.2 万场景单位，视口仅 ~2800；裁剪时若端点
+        露进视口，FlatCap 端帽就会出现可见接缝。这里用 6 万单位的曲线穿过
+        小视口，逐像素比对裁剪路径和整条路径。
+        """
+        from types import SimpleNamespace
+        from PySide6.QtCore import QPointF, QRect
+        from PySide6.QtGui import QImage, QPainter, QColor
+        from rwmap.widgets.trigger_graph_dock import (
+            EDGE_SPECS, GraphData, GraphEdge, GraphEdgeLayerItem, GraphNode,
+            _edge_color, _paint_edge_curve,
+        )
+
+        class _Obj:
+            type_ = "unitAdd"
+
+        nodes = {
+            "a": GraphNode("a", _Obj(), "L", "1", x=0.0, y=200.0),
+            "b": GraphNode("b", _Obj(), "L", "2", x=60000.0, y=200.0),
+        }
+        edge = GraphEdge("a", "b", "alsoActivate")
+        data = GraphData(nodes=nodes, edges=[edge])
+
+        class _View:
+            def zoom(self):
+                return 1.0
+
+            def viewport(self):
+                return QRect(0, 0, 800, 400)
+
+            def mapToScene(self, x, y):
+                return QPointF(x + 20000.0, y + 100.0)
+
+        dock = SimpleNamespace(data=data, _edge_lanes={id(edge): (0, 1)},
+                               _live_edges=set(), _active_cache=set(nodes),
+                               _overview_item=None, view=_View())
+
+        img_cached = QImage(800, 400, QImage.Format_ARGB32)
+        img_cached.fill(0)
+        p = QPainter(img_cached)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # 把绘制坐标从「场景」搬到测试画布：视口场景左上角 (20000, 100) -> (0, 0)
+        p.translate(-20000.0, -100.0)
+        layer = GraphEdgeLayerItem(dock)
+        layer.set_content()
+        layer.paint(p, None)
+        p.end()
+
+        img_full = QImage(800, 400, QImage.Format_ARGB32)
+        img_full.fill(0)
+        q = QPainter(img_full)
+        q.setRenderHint(QPainter.Antialiasing, True)
+        q.translate(-20000.0, -100.0)
+        _paint_edge_curve(q, nodes["a"], nodes["b"], 0, 1,
+                          _edge_color("alsoActivate"), 1.0, False)
+        q.end()
+
+        self.assertTrue(any(v is not None for v in layer._clip_cache.values()),
+                        "长曲线应走裁剪路径，否则本测试没覆盖到目标分支")
+        self._assert_same_pixels(img_cached, img_full)
 
 
 if __name__ == "__main__":

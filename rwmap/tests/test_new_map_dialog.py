@@ -64,19 +64,40 @@ class NewMapDialogTest(unittest.TestCase):
         doc = build_new_document(active_profile(), vals["width"], vals["height"],
                                  vals["tilesets"])
         self.assertEqual((doc.width, doc.height), (64, 64))
-        self.assertEqual(len(doc.layers), 1)
-        self.assertEqual(doc.layers[0].name, "Ground")
+        # 铁锈标准 5 层：Ground / Items / Units / Triggers / set
+        self.assertEqual([l.name for l in doc.layers],
+                         ["Ground", "Items", "Units", "Triggers", "set"])
         self.assertEqual(len(doc.tilesets), 1)
         self.assertGreater(doc.tilesets[0].firstgid, 0)
         self.assertIn((doc.tile_w, doc.tile_h), [(20, 20), (RW_TILE_SIZE, RW_TILE_SIZE)])
         # DOM 里同步了 <tileset>
         self.assertIn("tileset", [el.tag for el in doc.tree.getroot()])
 
+    def test_tilesets_have_real_gid_ranges(self):
+        """外部 .tsx 靠 PNG 尺寸推算 tilecount；GID 段不能全压在 1。"""
+        dlg = NewMapDialog(active_profile())
+        dlg._check_all(True)
+        paths = dlg.values()["tilesets"]
+        dlg.close()
+        doc = build_new_document(active_profile(), 32, 32, paths)
+        self.assertIsNotNone(doc.resolver)
+        self.assertGreater(len(doc.tilesets), 2)
+        firstgids = [t.firstgid for t in doc.tilesets]
+        self.assertEqual(len(set(firstgids)), len(firstgids), "GID 段重叠")
+        self.assertTrue(all(t.count > 0 for t in doc.tilesets),
+                        "有图集 tilecount=0，图块集面板会空白")
+        self.assertEqual(firstgids, sorted(firstgids))
+        # 相邻图集首格连续（无空洞）
+        for a, b in zip(doc.tilesets, doc.tilesets[1:]):
+            self.assertEqual(b.firstgid, a.last_gid + 1)
+
     def test_build_empty_document_uses_default_tile_size(self):
         doc = build_new_document(active_profile(), 10, 12, [])
         self.assertEqual((doc.width, doc.height), (10, 12))
         self.assertEqual((doc.tile_w, doc.tile_h), (RW_TILE_SIZE, RW_TILE_SIZE))
         self.assertEqual(len(doc.tilesets), 0)
+        self.assertEqual(len(doc.layers), 5)
+        self.assertEqual(doc.layers[0].name, "Ground")
 
 
 class NewMapIntegrationTest(unittest.TestCase):

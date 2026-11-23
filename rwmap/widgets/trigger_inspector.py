@@ -2,23 +2,24 @@
 
 界面术语与「属性模板」都来自网页版（并与 docs/铁锈地图_属性与指令速查.md 对齐）：
 * 类型下拉 / 属性名 / 属性值释义全部中文，但**写回文档的键与值仍是英文**；
-* 切换类型时属性严格换成新类型的模板（不适配的一律移除），可一键撤销切换；
-* 编辑走 ObjectCommand + QUndoStack，redo / undo 后由 Dock 统一刷新。
+* 切换类型时属性严格换成新类型的模板（不适配的一律移除）；
+* 编辑走 ObjectCommand + QUndoStack，redo / undo 后由 Dock 统一刷新；
+  撤销统一走 Ctrl+Z / 编辑菜单（主窗口动作转调当前文档的撤销栈），面板不再放撤销按钮。
 
 本模块不 import 任何 WebEngine / HTML 相关组件。
 """
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QWheelEvent
 from rwmap.document.map_object import object_uid
 from rwmap.document.properties import HIDDEN_EDITOR_PROPERTIES
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QScrollArea, QSizePolicy, QStyleOptionViewItem,
+    QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
 from ..rw import unit_names
@@ -47,6 +48,8 @@ THEME = {
 # 网页版 TYPE_COLORS（标题条）
 TYPE_COLORS = {
     "unitDetect": "#2f6ea8", "unitAdd": "#2f8f52", "unitRemove": "#a04040",
+    # 三种「造兵」类型统一用生成单位的绿色（用户要求），不另造颜色。
+    "unitAddRandom": "#2f8f52", "mapUnit": "#2f8f52",
     "changeCredits": "#9a8a30", "move": "#6a4fa0", "point": "#3a7a7a",
     "basic": "#555555", "camera_pan": "#4a6a8a", "rotate": "#6a4a6a",
     "moveCamera": "#3a6a6a", "objective": "#8a6a2a", "set_team": "#5a4a8a",
@@ -91,6 +94,35 @@ def draw_symmetric_cross(painter: QPainter, center: QPointF, radius: float,
     x, y, r = center.x(), center.y(), radius
     painter.drawLine(QPointF(x - r, y - r), QPointF(x + r, y + r))
     painter.drawLine(QPointF(x - r, y + r), QPointF(x + r, y - r))
+
+
+class NoWheelComboBox(QComboBox):
+    """滚轮不切换选项的下拉框：需求要求类型 / 属性下拉禁用滚轮切换。
+
+    滚轮事件直接忽略（不接受）：值不会被滚轮改动，事件继续交给父级 QScrollArea
+    滚动面板，和项目里 PlainSpinBox 的约定一致。
+    """
+
+    def wheelEvent(self, event: QWheelEvent):  # noqa: N802
+        event.ignore()
+
+
+class _TypeColorDelegate(QStyledItemDelegate):
+    """按下拉项自带的 ForegroundRole 上色，画成对应类型的标题条色。
+
+    QComboBox 的样式表 color / 应用 palette 会把 item 的 ForegroundRole
+    覆盖成统一文字色（实测：下拉里全是 #d8d8d8）。这里在绘制前显式把
+    option.palette 的文字色改成该项的 ForegroundRole，确保每个类型显示
+    自己的颜色（生成=绿、检测=蓝、移除=红…）。
+    """
+
+    def paint(self, painter, option, index):
+        color = index.data(Qt.ForegroundRole)
+        if isinstance(color, QColor) and color.isValid():
+            option = QStyleOptionViewItem(option)
+            option.palette.setColor(option.palette.ColorRole.Text, color)
+            option.palette.setColor(option.palette.ColorRole.HighlightedText, color)
+        super().paint(painter, option, index)
 
 
 class CrossButton(QPushButton):
@@ -139,8 +171,16 @@ class CrossButton(QPushButton):
 # ---------------------------------------------------------------- 中文词典
 # value = (中文名, 说明, 该类型适配的属性模板)
 TYPE_DEFS: dict[str, tuple[str, str, tuple[str, ...]]] = {
-    "unitAdd": ("生成单位", "刷兵 / 生成单位",
+    "unitAdd": ("生成单位", "刷兵 / 生成单位（固定单位列表）",
+                ("spawnUnits", "team", "warmup", "repeatDelay")),
+    "unitAddRandom": ("随机生成单位", "按权重随机刷兵；导出时展开为 spawnChance，"
+                      "TMX 里仍写 unitAdd",
                 ("randomUnits", "team", "warmup", "repeatDelay")),
+    # 地图初始单位：TMX 里无 type，靠 unit + team 属性识别。内部用 mapUnit key，
+    # 导出时映射回空 type；仅当空 type 且带 unit 属性时才识别为此类型。
+    # 顺序紧跟「随机生成单位」，三种造兵类型排在一起。
+    "mapUnit": ("地图初始单位", "开局就摆在地图上的单位；TMX 中无 type，靠 unit + team 属性识别",
+                ("unit", "team")),
     "unitDetect": ("检测单位", "检测区域内单位数量，满足条件后触发",
                    ("unitType", "minUnits", "maxUnits", "team", "includeIncomplete")),
     "unitRemove": ("移除单位", "清空矩形内的单位（不支持指定兵种 / 数量）",
@@ -173,6 +213,23 @@ TYPE_DEFS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "info": ("说明信息", "纯说明节点", ("text",)),
 }
 
+# 空 type 且带 unit 属性 => 地图初始单位；其余空 type（map_info / 矩形等）保持未分类
+INITIAL_UNIT_TYPE = "mapUnit"
+
+
+def effective_type(obj) -> str:
+    """返回对象用于显示/属性模板的有效类型。
+
+    地图初始单位在 TMX 里没有 type，靠 unit 属性区分；但 map_info、矩形等
+    辅助对象同样没有 type，不能一概当初始单位。所以只有「空 type + 带 unit
+    属性」才归为 mapUnit，其余空 type 原样返回（界面显示为未分类）。
+    """
+    t = getattr(obj, "type_", "") or ""
+    if not t and "unit" in (getattr(obj, "properties", None)
+                            and obj.properties.values or {}):
+        return INITIAL_UNIT_TYPE
+    return t
+
 COMMON_PROPS = (
     "team", "warmup", "delay", "repeatDelay", "resetActivationAfter",
     "activatedBy", "deactivatedBy", "allToActivate", "whenActivatedIds",
@@ -187,6 +244,8 @@ PROP_DEFS: dict[str, tuple[str, str, str]] = {
     "team": ("作用队伍", "数字 / -1 / -2 / none", "1"),
     "spawnUnits": ("生成单位", "单位内部名，可写 *数量，多个用逗号分隔",
                    "heavyTank*10, builder*2"),
+    "unit": ("初始单位", "单个单位的内部名（raw name），如 experimentalHoverTank",
+             "experimentalHoverTank"),
     "randomUnits": ("随机生成单位", "逗号 / 顿号分隔的单位列表（可写中文），"
                     "导出时自动按等概率展开为 spawnUnits",
                     "heavyTank,mammothTank"),
@@ -335,19 +394,6 @@ def describe_value(key: str, value) -> str:
     return "、".join(hints)
 
 
-@dataclass
-class SwitchSnapshot:
-    """切换类型前的快照，供「撤销切换」还原。"""
-    oid: int
-    type_: str
-    name: str
-    props: dict[str, str]
-    removed: list[str]
-    filled: list[str]
-    # 重复 object_id 的地图里 oid 无法区分对象，用稳定身份判断快照是否属于当前对象
-    uid: tuple | None = None
-
-
 # ---------------------------------------------------------------- 控件
 def _clear_layout(layout):
     """立即把旧控件从父级摘掉再延迟销毁。
@@ -391,14 +437,17 @@ class TriggerInspector(QWidget):
         self.undo_stack = None
         self.on_change = None
         self._loading = False
-        self._switch: SwitchSnapshot | None = None
 
         self.setStyleSheet(f"""
             QWidget#TriggerInspector{{background:{THEME['panel']};}}
             QScrollArea{{background:{THEME['panel']};border:0;}}
-            QLineEdit,QComboBox{{background:{THEME['input']};color:{THEME['text']};
-                border:1px solid {INK};border-radius:4px;padding:4px 6px;font-size:12px;}}
-            QLineEdit:focus,QComboBox:focus{{border:1px solid {THEME['accent']};}}
+            QLineEdit{{background:{THEME['input']};color:{THEME['text']};
+                border:1px solid {ASH};border-radius:4px;padding:4px 6px;font-size:9pt;}}
+            /* QComboBox 不设 color：让每项用自己的 ForegroundRole 显示类型色。
+               若在这里写 color，会覆盖 item 前景色，下拉里全是同一文字色。 */
+            QComboBox{{background:{THEME['input']};
+                border:1px solid {ASH};border-radius:4px;padding:4px 6px;font-size:9pt;}}
+            QLineEdit:focus,QComboBox:focus{{border:1px solid {TEXT};}}
             QComboBox::drop-down{{border:0;}}
             QScrollBar:vertical{{background:{THEME['panel']};width:8px;}}
             QScrollBar::handle:vertical{{background:{THEME['node']};border-radius:4px;}}
@@ -434,15 +483,14 @@ class TriggerInspector(QWidget):
         return self._loading
 
     def clear(self):
-        """清空当前节点显示；保留类型切换快照（refresh 会短暂触发空选中）。"""
+        """清空当前节点显示（refresh 会短暂触发空选中）。"""
         self.obj = None
         self.node = None
         self.edges = []
         self._show_empty()
 
     def reset(self):
-        """切换文档 / 删除对象时连切换快照一起清掉。"""
-        self._switch = None
+        """切换文档 / 删除对象时清空当前显示。"""
         self.clear()
 
     def show_node(self, node, edges=None, layer=None):
@@ -452,14 +500,6 @@ class TriggerInspector(QWidget):
         self.edges = list(edges or [])
         if layer is not None:
             self.layer = layer
-        if self._switch is not None:
-            if self._switch.uid is not None:
-                same = (self.obj is not None
-                        and self._switch.uid == object_uid(self.obj))
-            else:   # 兼容没有 uid 字段的旧快照
-                same = self._switch.oid == getattr(self.obj, "object_id", None)
-            if not same:
-                self._switch = None
         self._render()
 
     # ---------------- 渲染 ----------------
@@ -516,15 +556,29 @@ class TriggerInspector(QWidget):
                                "修改触发器名字"))
         self._field("名字", self.f_name)
 
-        # 类型（中文（english））
-        self.f_type = QComboBox()
+        # 类型（中文（english））——滚轮不切换选项
+        self.f_type = NoWheelComboBox()
         self.f_type.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.f_type.setItemDelegate(_TypeColorDelegate(self.f_type))
+
+        def _add_typed_item(text, key, color_key=None):
+            """加一个下拉项，并按该类型的标题条颜色给文字上色。"""
+            row = self.f_type.count()
+            self.f_type.addItem(text, key)
+            self.f_type.setItemData(
+                row, QColor(color_for(color_key if color_key is not None else key)),
+                Qt.ForegroundRole)
+
         for key, (label, _hint, _tpl) in TYPE_DEFS.items():
-            self.f_type.addItem(f"{label}（{key}）", key)
-        cur = obj.type_ or ""
+            _add_typed_item(f"{label}（{key}）", key)
+        # 纯空 type（map_info / 矩形等辅助对象）显示为「未分类」，不要误当初始单位
+        if not any(self.f_type.itemData(i) == "" for i in range(self.f_type.count())):
+            # 空 type 对应默认灰（未分类），与节点标题条一致
+            _add_typed_item("未分类（空 type）", "", "")
+        cur = effective_type(obj)
         idx = self.f_type.findData(cur)
         if idx < 0:
-            self.f_type.addItem(f"未知类型（{cur}）", cur)
+            _add_typed_item(f"未知类型（{cur}）", cur)
             idx = self.f_type.count() - 1
         self.f_type.setCurrentIndex(idx)
         self.f_type.currentIndexChanged.connect(self._on_type_changed)
@@ -536,39 +590,16 @@ class TriggerInspector(QWidget):
         hint.setWordWrap(True)
         self.vbox.addWidget(hint)
 
-        # ID
+        # 触发器 ID：按需求在界面隐藏。控件仍创建（保留数据绑定 / 兼容读取
+        # .text() 的调用与测试），但不加入布局、不显示；文档里的 id 照常保留。
+        # 不设父级、不加入布局、也不 show()：既不会闪顶层空窗，也不会每次
+        # 渲染残留隐藏子控件（旧 f_id 随重新赋值被回收）。
         self.f_id = QLineEdit(props.get("id", ""))
         self.f_id.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.f_id.editingFinished.connect(
             lambda: self._edit(
                 lambda o, v=self.f_id.text(): o.properties.set("id", v),
                 "修改触发器 ID"))
-        self._field("触发器 ID（被引用）", self.f_id)
-
-        # 切换提示
-        if self._switch is not None:
-            tip = QFrame()
-            tip.setStyleSheet(
-                f"QFrame{{background:{THEME['panel']};border:1px solid {ASH};border-radius:4px;}}")
-            h = QHBoxLayout(tip)
-            h.setContentsMargins(7, 5, 7, 5)
-            text = (f"已按「{type_label(cur)}」更换为适配属性，"
-                    f"移除了 {len(self._switch.removed)} 个不适配属性"
-                    f"（其中 {len(self._switch.filled)} 个有值）。"
-                    "通用参数可从下方下拉补回。")
-            lab = self._label(text, THEME["text"], 10)
-            lab.setWordWrap(True)
-            lab.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            h.addWidget(lab)
-            undo = QPushButton("撤销切换")
-            undo.setFixedWidth(70)
-            undo.setStyleSheet(
-                f"QPushButton{{background:transparent;border:0;color:{TEXT};"
-                "text-decoration:underline;font-size:11px;padding:0;}")
-            undo.clicked.connect(self._undo_switch)
-            h.addWidget(lab, 1)
-            h.addWidget(undo, 0, Qt.AlignTop)
-            self.vbox.addWidget(tip)
 
         # 属性表
         self._group("属性（中文标签 · 导出仍为英文键）")
@@ -592,9 +623,9 @@ class TriggerInspector(QWidget):
         if count == 0:
             self.vbox.addWidget(self._label("该类型无需属性", THEME["muted"], 11))
 
-        # 添加属性
+        # 添加属性 ——滚轮不切换选项
         add_row = QHBoxLayout()
-        self.prop_select = QComboBox()
+        self.prop_select = NoWheelComboBox()
         self._fill_prop_picker(props, cur)
         self.prop_select.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.prop_select.setMinimumWidth(0)
@@ -906,7 +937,9 @@ class TriggerInspector(QWidget):
             return
         new_type = self.f_type.currentData()
         old_type = self.obj.type_ or ""
-        if not new_type or new_type == old_type:
+        # new_type 允许是空串（「地图初始单位」在 TMX 里 type 为空），
+        # 只有 QComboBox 未选中返回 None 时才跳过。
+        if new_type is None or new_type == old_type:
             return
         before_props = dict(self.obj.properties.values)
         # 类型切换只能重建「类型相关属性」；编辑器私有属性（分组 / 节点位置）
@@ -917,18 +950,6 @@ class TriggerInspector(QWidget):
                 k in self.obj.properties.text_props)
             for k in HIDDEN_EDITOR_PROPERTIES if k in before_props
         }
-        keep = {"id", *HIDDEN_EDITOR_PROPERTIES, *type_props(new_type)}
-        removed = [k for k in before_props if k not in keep]
-        filled = [k for k in removed if before_props[k] != ""]
-        raw_uid = object_uid(self.obj)
-        # 只有 xml_element 身份才跨 ObjectCommand 克隆稳定；测试/新建对象的
-        # uid 是实例 id，克隆后会变，此时退回 object_id 判定（旧行为）。
-        uid = raw_uid if raw_uid[0] == "xml" else None
-        self._switch = SwitchSnapshot(
-            oid=self.obj.object_id, type_=old_type,
-            name=self.obj.name or "", props=before_props,
-            removed=removed, filled=filled, uid=uid)
-
         def mutate(o):
             bag = o.properties
             bag.values.clear()
@@ -946,24 +967,6 @@ class TriggerInspector(QWidget):
                 o.name = type_label(new_type)
 
         self._commit(mutate, f"切换触发器类型为 {type_label(new_type)}")
-
-    def _undo_switch(self):
-        snap = self._switch
-        if snap is None or self.obj is None:
-            return
-
-        def mutate(o):
-            bag = o.properties
-            bag.values.clear()
-            bag.types.clear()
-            bag.text_props.clear()
-            for k, v in snap.props.items():
-                bag.set(k, v)
-            o.type_ = snap.type_
-            o.name = snap.name
-
-        self._switch = None
-        self._commit(mutate, "撤销类型切换")
 
     def _delete_node(self):
         if self.obj is None or self.layer is None:

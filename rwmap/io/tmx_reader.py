@@ -45,9 +45,21 @@ def _common_layer_fields(elem, layer):
     return layer
 
 
-def read_document(path, profile=None, resolver: ResourceResolver | None = None) -> MapDocument:
+def read_document(path, profile=None, resolver: ResourceResolver | None = None,
+                  progress=None) -> MapDocument:
+    """读取 TMX 文档。
+
+    ``progress`` 为可选的 ``(percent: int, message: str) -> None`` 回调，用于在
+    异步打开地图时报告解析进度；不传时（默认）解析行为与旧版完全一致。
+    """
+    def report(pct: int, msg: str):
+        if progress is not None:
+            progress(pct, msg)
+
     p = as_path(path)
+    report(2, "解析地图结构…")
     tree, root = parse_tmx(p)
+    report(8, "加载图块集与图层…")
     resolver = resolver or ResourceResolver(p, profile)
     doc = MapDocument(
         path=p,
@@ -66,7 +78,10 @@ def read_document(path, profile=None, resolver: ResourceResolver | None = None) 
         profile=profile,
     )
 
-    for child in iter_elements(root):
+    children = list(iter_elements(root))
+    nchild = max(1, len(children))
+    for ci, child in enumerate(children):
+        child_pct = 8 + int(78 * ci / nchild)      # 8% → 86%
         if child.tag == "properties":
             doc.properties = PropertyBag.from_element(child)
         elif child.tag == "tileset":
@@ -107,9 +122,15 @@ def read_document(path, profile=None, resolver: ResourceResolver | None = None) 
         elif child.tag == "objectgroup":
             layer = ObjectLayer(kind="object")
             _common_layer_fields(child, layer)
-            for sub in iter_elements(child):
+            # 对象数量常达数千，是解析最大头：在本 child 的百分比份额内细分上报。
+            _obj_children = list(iter_elements(child))
+            _nobj = max(1, sum(1 for sub in _obj_children if sub.tag == "object"))
+            for _oi, sub in enumerate(_obj_children):
                 if sub.tag != "object":
                     continue
+                if _oi % 256 == 0:
+                    report(child_pct + int(78 / nchild * _oi / _nobj),
+                           "解析地图对象…")
                 obj = MapObject(
                     object_id=_int(sub.get("id"), 0),
                     name=sub.get("name", ""),
@@ -176,9 +197,12 @@ def read_document(path, profile=None, resolver: ResourceResolver | None = None) 
                 layer.objects.append(obj)
             doc.layers.append(layer)
 
+    report(88, "整理图层…")
     _strip_decor_cells(doc)
     doc.rebuild_index()
+    report(94, "应用图层规则…")
     _apply_layer_rules(doc)
+    report(100, "完成")
     return doc
 
 

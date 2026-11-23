@@ -34,6 +34,9 @@ class MiniMap(QWidget):
         self._overview_version = -1   # 生成概览时的图集缓存代次
         self._dirty_cells: set[tuple[int, int]] = set()
         self._full_invalidate = True  # 结构变化 → 强制全量重建
+        # 概览用的图块代表色按 raw gid 缓存；图集缓存换代时整体丢弃。
+        self._color_cache: dict[int, int | None] = {}
+        self._color_cache_version = -1
         self.setMinimumSize(160, 120)
         self.setMouseTracking(True)
 
@@ -60,36 +63,89 @@ class MiniMap(QWidget):
             view.verticalScrollBar().valueChanged.connect(self.update)
         self.update()
 
+    @staticmethod
+    def _tile_color(doc, raw, cache):
+        """取一个 raw gid 在概览中用的代表色（按 alpha 加权平均）。
+
+        概览最长边 512px，330x265 地图每格只有约 1.5px；把 20x20 图块
+        逐格 Smooth 缩放没有意义，取平均色即可。同一 gid 只算一次。
+        """
+        if raw in cache:
+            return cache[raw]
+        color = None
+        loc = doc.local_tile(raw)
+        if loc is not None:
+            ts, local_id = loc
+            pix = get_pixmap(ts, local_id, (False, False, False), doc.resolver)
+            if pix is not None and not pix.isNull():
+                img = pix.toImage().convertToFormat(QImage.Format_ARGB32)
+                a_sum = r_sum = g_sum = b_sum = 0
+                for y in range(img.height()):
+                    for x in range(img.width()):
+                        c = img.pixelColor(x, y)
+                        a = c.alpha()
+                        if a == 0:
+                            continue
+                        a_sum += a
+                        r_sum += c.red() * a
+                        g_sum += c.green() * a
+                        b_sum += c.blue() * a
+                if a_sum:
+                    mean_a = a_sum // (img.width() * img.height())
+                    color = QColor(r_sum // a_sum, g_sum // a_sum,
+                                   b_sum // a_sum, mean_a).rgba()
+        cache[raw] = color
+        return color
+
+    def _build_cell_image(self):
+        """把整张地图压成「一格一像素」的 ARGB 图，逐层按 opacity 合成。"""
+        doc = self._doc
+        cols, rows = doc.width, doc.height
+        img = QImage(cols, rows, QImage.Format_ARGB32)
+        img.fill(0)
+        version = cache_version()
+        if self._color_cache_version != version:
+            self._color_cache.clear()
+            self._color_cache_version = version
+        color_cache = self._color_cache
+        missing = object()
+        for layer in doc.tile_layers():
+            if not layer.visible:
+                continue
+            layer_img = QImage(cols, rows, QImage.Format_ARGB32)
+            layer_img.fill(0)
+            for row in range(rows):
+                base = row * layer.width
+                for col in range(cols):
+                    raw = layer.cells[base + col]
+                    if raw == 0:
+                        continue
+                    color = color_cache.get(raw, missing)
+                    if color is missing:
+                        color = self._tile_color(doc, raw, color_cache)
+                    if color is None:
+                        continue
+                    layer_img.setPixel(col, row, color)
+            layer_painter = QPainter(img)
+            layer_painter.setOpacity(max(0.0, min(1.0, layer.opacity)))
+            layer_painter.drawImage(0, 0, layer_img)
+            layer_painter.end()
+        return img
+
     def _draw_cells_region(self, painter, col0: int, row0: int,
                            col1: int, row1: int):
-        """把 [col0..col1] x [row0..row1] 范围内的所有可见层画进概览。
+        """把可见瓦片层画进概览（局部刷新靠 painter 的 clipRect 限制范围）。
 
-        全量重建与局部增量共用这一套绘制语句（SmoothPixmapTransform、
-        setOpacity、目标 / 源矩形），保证局部结果与全量逐像素一致。
+        全量重建与局部增量都先生成同一张「一格一像素」整图，再整图一次
+        drawImage 缩放到概览尺寸。这样局部与全量的插值/边界完全一致，
+        同时把真实图 11.5 万次逐格 drawPixmap/get_pixmap 降为 83 次取色。
         """
         doc = self._doc
         cw = doc.tile_w * self._scale
         ch = doc.tile_h * self._scale
-        for layer in doc.tile_layers():
-            if not layer.visible:
-                continue
-            painter.setOpacity(max(0.0, min(1.0, layer.opacity)))
-            for row in range(row0, row1 + 1):
-                base = row * layer.width
-                for col in range(col0, col1 + 1):
-                    raw = layer.cells[base + col]
-                    if raw == 0:
-                        continue
-                    loc = doc.local_tile(raw)
-                    if loc is None:
-                        continue
-                    ts, local_id = loc
-                    pix = get_pixmap(ts, local_id, (False, False, False), doc.resolver)
-                    if pix is None or pix.isNull():
-                        continue
-                    painter.drawPixmap(
-                        QRectF(col * cw, row * ch, cw, ch), pix,
-                        QRectF(0, 0, pix.width(), pix.height()))
+        cells = self._build_cell_image()
+        painter.drawImage(
+            QRectF(0, 0, doc.width * cw, doc.height * ch), cells)
 
     def refresh_overview(self):
         """全量重建概览：打开 / 换文档 / 图层结构 / 换图集后调用。"""
@@ -164,7 +220,7 @@ class MiniMap(QWidget):
         clip = QRect(px0, py0, px1 - px0, py1 - py0)
         # 与全量重建一样画在 QImage 上（而不是直接画 QPixmap），
         # 避免设备格式差异造成颜色偏差。
-        img = self._overview.toImage()
+        img = self._overview.toImage().convertToFormat(QImage.Format_ARGB32)
         painter = QPainter(img)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
         painter.setClipRect(clip)

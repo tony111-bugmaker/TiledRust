@@ -204,8 +204,7 @@ class TileCacheTest(unittest.TestCase):
         for scale in (1.0, 0.5, 0.25):
             with self.subTest(scale=scale):
                 item._tile_dirty_all = True
-                item._tile_cache.clear()
-                item._tile_lru.clear()
+                item._clear_tile_cache()
                 img = _render(item, scale=scale, center=(30.0, 30.0))
                 ox = int(img.width() / 2 + (10 - 30) * scale)
                 oy = int(img.height() / 2 + (10 - 30) * scale)

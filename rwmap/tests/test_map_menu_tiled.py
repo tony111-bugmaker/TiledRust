@@ -21,7 +21,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPointF
-from PySide6.QtWidgets import QApplication, QDialog, QInputDialog  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from rwmap.app.app_state import AppState  # noqa: E402
 from rwmap.app.main_window import MainWindow  # noqa: E402
@@ -88,6 +88,27 @@ class TestMapMenuStructure(MapMenuBase):
         self.assertIn(w.act_automap_while, self.map_menu.actions())
         self.assertNotIn(w.act_automap_while, w.object_toolbar.actions())
         self.assertIsNone(w.object_toolbar.widgetForAction(w.act_automap_while))
+
+    def test_new_submenu_top_of_file(self):
+        """文件菜单最上面是「新建」子菜单，点开显示地图 / 瓦片图集两项。"""
+        w = self.w
+        file_menu = next(m.menu() for m in w.menuBar().actions()
+                         if m.text() == "文件")
+        actions = file_menu.actions()
+        self.assertEqual(actions[0].text(), "新建")
+        # 「新建」与「打开 .tmx」之间不要分隔线（用户要求紧贴）
+        self.assertEqual(actions[1].text(), "打开 .tmx")
+        self.assertFalse(actions[1].isSeparator())
+        sub = actions[0].menu()
+        self.assertIsNotNone(sub)
+        self.assertEqual([a.text() for a in sub.actions()],
+                         ["新建地图…", "新建瓦片图集…"])
+        self.assertEqual(sub.actions()[0].data(), None)  # 保留 QAction 身份
+        self.assertIs(sub.actions()[0], w.act_new_map)
+        self.assertIs(sub.actions()[1], w.act_new_tileset)
+        # 旧位置不再重复
+        self.assertNotIn(w.act_new_map, self.map_menu.actions())
+        self.assertNotIn(w.act_new_tileset, actions)
 
     def test_actions_exist_and_enabled(self):
         # 真实接线由各功能测试用 mock 触发验证；这里只确认 action 就位可用。
@@ -198,13 +219,16 @@ class TestAutocrop(MapMenuBase):
 
 class TestGotoAndTilesetSwitch(MapMenuBase):
     def test_goto_centers_view(self):
+        from rwmap.widgets.goto_tile_dialog import GotoTileDialog
         w = self.w
         w._open(Path(w.state.profile.sample_map))
         _app.processEvents()
-        with mock.patch.object(QInputDialog, "getInt",
-                               side_effect=[(5, True), (7, True)]):
-            with mock.patch.object(w.view, "centerOn") as co:
-                w._goto_tile()
+        with mock.patch.object(GotoTileDialog, "exec",
+                               return_value=QDialog.Accepted):
+            with mock.patch.object(GotoTileDialog, "values",
+                                   return_value=(5, 7)):
+                with mock.patch.object(w.view, "centerOn") as co:
+                    w._goto_tile()
         co.assert_called_once()
         doc = w.state.doc
         expected = QPointF(5.5 * doc.tile_w, 7.5 * doc.tile_h)
@@ -212,11 +236,26 @@ class TestGotoAndTilesetSwitch(MapMenuBase):
         self.assertAlmostEqual(co.call_args[0][0].y(), expected.y())
 
     def test_goto_cancel_noop(self):
+        from rwmap.widgets.goto_tile_dialog import GotoTileDialog
         w = self.w
-        with mock.patch.object(QInputDialog, "getInt", return_value=(0, False)):
+        with mock.patch.object(GotoTileDialog, "exec", return_value=QDialog.Rejected):
             with mock.patch.object(w.view, "centerOn") as co:
                 w._goto_tile()
         co.assert_not_called()
+
+    def test_goto_dialog_has_both_inputs(self):
+        """对话框一次展示列/行两个输入框，取值范围受地图尺寸限制。"""
+        from PySide6.QtWidgets import QAbstractSpinBox
+        from rwmap.widgets.goto_tile_dialog import GotoTileDialog
+        dlg = GotoTileDialog(None, max_col=9, max_row=19, col=2, row=3)
+        self.assertEqual(dlg.windowTitle(), "转到图块")
+        self.assertEqual(dlg.col_spin.maximum(), 9)
+        self.assertEqual(dlg.row_spin.maximum(), 19)
+        self.assertEqual((dlg.col_spin.value(), dlg.row_spin.value()), (2, 3))
+        for spin in (dlg.col_spin, dlg.row_spin):
+            self.assertEqual(spin.buttonSymbols(), QAbstractSpinBox.NoButtons)
+        dlg.col_spin.setValue(6); dlg.row_spin.setValue(15)
+        self.assertEqual(dlg.values(), (6, 15))
 
     def test_switch_tileset_cycles(self):
         w = self.w

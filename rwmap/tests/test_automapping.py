@@ -52,6 +52,31 @@ class AutoMappingEngineTest(unittest.TestCase):
         self.mapper.compute(self.doc, area=(30, 30, 34, 34), radius=2)
         self.assertEqual(before, list(g.cells))
 
+    def test_pattern_fast_index_matches_naive_scan(self):
+        """图案索引快路必须与逐规则试匹配产出完全一致（含局部窗口）。"""
+        import copy
+        doc = copy.deepcopy(self.doc)
+        set_layer = doc.layer_by_name("set")
+        # 造一块连片草地，触发大量 2x2 过渡规则。
+        for row in range(38, 52):
+            for col in range(40, 60):
+                set_layer.cells[set_layer.index(col, row)] = 126
+        rules = self.mapper._project_rules(doc)
+        bucket, fast_ids = self.mapper._fast_index(rules)
+        self.assertGreater(len(fast_ids), 0)
+        self.assertLess(len(fast_ids), len(rules))   # 非常规规则仍走慢路
+        area = (38, 38, 61, 54)
+        try:
+            self.mapper._fast_index_cache = ({}, set())
+            self.mapper._fast_rules_ref = rules
+            slow = self.mapper.compute(doc, area=area, only_diff=True)
+        finally:
+            self.mapper._fast_index_cache = None
+            self.mapper._fast_rules_ref = None
+        fast = self.mapper.compute(doc, area=area, only_diff=True)
+        self.assertEqual({k: sorted(v) for k, v in slow.items()},
+                         {k: sorted(v) for k, v in fast.items()})
+
     def test_full_map_reproduces_official_ground(self):
         g = self._ground()
         for i in range(len(g.cells)):

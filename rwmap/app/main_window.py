@@ -8,12 +8,13 @@ from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QAction, QCursor, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractScrollArea, QApplication, QComboBox, QDialog, QFileDialog,
-    QInputDialog, QLabel,
+    QInputDialog, QLabel, QProgressBar,
     QHBoxLayout, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
     QStackedWidget, QTabBar, QToolBar, QVBoxLayout, QWidget,
 )
 
 from ..app.app_state import AppState
+from ..app.map_loader import MapLoadController, MapLoadSignals
 from ..app.panel_layout import (
     PANEL_SPECS, apply_default_layout, ensure_panel_object_names, iter_panels,
     load_layout, save_layout,
@@ -100,6 +101,12 @@ class MainWindow(QMainWindow):
         self._doc_edited_conn = None
         self._displayed_ctx_id = None
         self._own_file = False
+        # 异步地图加载：信号桥必须在 GUI 线程构造（此处即 GUI 线程）。
+        self._load_signals = MapLoadSignals()
+        self._load_controller = MapLoadController(self._load_signals)
+        self._load_pending_token = 0      # >0 表示有一次加载在途
+        self._load_pending_path = None
+        self._load_ctx = None             # 本次加载对应的 AppState（发起时创建）
         self._zoom = 1.0
         self.probe_window = None
         self._automapper = None
@@ -468,7 +475,7 @@ class MainWindow(QMainWindow):
         )
         self.act_new_map = QAction("新建地图…", self)
         self.act_new_map.triggered.connect(self._new_map)
-        self.act_new_tileset = QAction("新建图集…", self)
+        self.act_new_tileset = QAction("新建瓦片图集…", self)
         self.act_new_tileset.setToolTip(
             "用一张图集大图生成铁锈瓦片图集（.tsx），在独立标签里逐格调属性")
         self.act_new_tileset.triggered.connect(self._new_tileset)
@@ -506,7 +513,11 @@ class MainWindow(QMainWindow):
         self.act_trigger_graph.triggered.connect(self._toggle_trigger_graph)
 
         file_menu = self.menuBar().addMenu("文件")
-        for action in (self.act_open, self.act_sample, self.act_new_tileset,
+        # Tiled 式「新建」置顶子菜单：点开先选新建地图 / 新建瓦片图集。
+        new_menu = file_menu.addMenu("新建")
+        new_menu.addAction(self.act_new_map)
+        new_menu.addAction(self.act_new_tileset)
+        for action in (self.act_open, self.act_sample,
                        self.act_save, self.act_save_as,
                        self.act_thumb, self.act_pack):
             file_menu.addAction(action)
@@ -534,7 +545,7 @@ class MainWindow(QMainWindow):
         map_menu = self.menuBar().addMenu("地图")
         # Tiled「地图」菜单形态：外部图块 / 规则图集 → 尺寸类 → 自动映射类
         # → 定位 / 图块集切换 → 属性。绘制时自动地图只在此菜单出现。
-        map_menu.addAction(self.act_new_map)
+        # 「新建地图 / 新建瓦片图集」已统一移到「文件 > 新建」置顶子菜单。
         map_menu.addAction(self.act_add_external_tileset)
         map_menu.addAction(self.act_add_rules_tileset)
         map_menu.addSeparator()
@@ -808,11 +819,37 @@ class MainWindow(QMainWindow):
     def _build_status(self):
         self.status_profile = QLabel(self.state.profile.version_id)
         self.status_zoom = QLabel("100%")
+        # 地图加载进度条：常态隐藏，打开大地图时显示，避免窗口假死无反馈。
+        self.load_progress = QProgressBar(self.statusBar())
+        self.load_progress.setRange(0, 100)
+        self.load_progress.setValue(0)
+        self.load_progress.setFixedWidth(180)
+        self.load_progress.setTextVisible(True)
+        self.load_progress.setToolTip("地图加载进度")
+        # 原生进度条在部分主题下是灰色矩形，这里统一成 Windows 蓝 + 圆角。
+        # 边框用 palette(mid) 跟随明暗主题，填充固定 Windows 强调色。
+        self.load_progress.setStyleSheet(
+            "QProgressBar {"
+            "  border: 1px solid palette(mid);"
+            "  border-radius: 6px;"
+            "  text-align: center;"
+            "}"
+            "QProgressBar::chunk {"
+            "  background-color: #0078d4;"
+            "  border-radius: 5px;"
+            "}"
+        )
+        self.load_progress.hide()
+        self.statusBar().addPermanentWidget(self.load_progress)
         self.statusBar().addPermanentWidget(self.status_profile)
         self.statusBar().addPermanentWidget(self.status_zoom)
         self.statusBar().showMessage("就绪")
 
     def _connect_signals(self):
+        # 异步地图加载信号（worker emit → queued 回 GUI 线程）
+        self._load_signals.progress.connect(self._on_load_progress)
+        self._load_signals.succeeded.connect(self._on_load_succeeded)
+        self._load_signals.failed.connect(self._on_load_failed)
         self.view.cellPressed.connect(self._on_press)
         self.view.cellMoved.connect(self._on_move)
         self.view.cellReleased.connect(self._on_release)
@@ -869,7 +906,7 @@ class MainWindow(QMainWindow):
     def _open_sample(self):
         sample = as_path(self.state.profile.sample_map)
         if sample.is_file():
-            self._open(sample)
+            self._open_async(sample)
         else:
             self.statusBar().showMessage(f"示例地图不存在: {sample}")
 
@@ -902,15 +939,20 @@ class MainWindow(QMainWindow):
         start = self._open_dialog_start_dir()
         path, _ = QFileDialog.getOpenFileName(self, "打开 Tiled 地图", start, "TMX 地图 (*.tmx)")
         if path:
-            self._open(as_path(path))
+            self._open_async(as_path(path))
 
     def _open(self, path: Path):
+        """同步打开地图（供测试与程序化调用；UI 入口走 _open_async）。"""
         ctx = self._new_or_reuse_context()
         try:
             ctx.open(path)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "打开失败", str(exc))
             return
+        self._finish_open(ctx, path)
+
+    def _finish_open(self, ctx: AppState, path: Path):
+        """doc 已装入 ctx 后的公共收尾：attach + 状态栏。同步/异步路径共用。"""
         self._own_file = False
         self._attach_context(ctx)
         legacy_note = "（1.14 地图，已自动按 1.15 规则读取）" \
@@ -919,6 +961,63 @@ class MainWindow(QMainWindow):
             f"已打开 {path.name}  {ctx.doc.width}x{ctx.doc.height}  "
             f"{len(ctx.doc.layers)} 层 / {len(ctx.doc.tilesets)} 图块集{legacy_note}"
         )
+
+    def _open_async(self, path: Path):
+        """异步打开地图：解析在后台线程进行，GUI 线程保持响应并显示进度。
+
+        与 ``_open`` 的最终结果完全一致（同一套 ``_finish_open`` 收尾），
+        只是把最耗时的 ``read_document`` 挪出了 GUI 线程。
+        """
+        if self._load_pending_token:
+            # 已有加载在途：忽略重复请求，避免并发装载互相踩踏。
+            self.statusBar().showMessage("正在打开上一张地图，请稍候…")
+            return
+        ctx = self._new_or_reuse_context()
+        self._load_ctx = ctx
+        self._load_pending_path = path
+        self.load_progress.setValue(0)
+        self.load_progress.show()
+        self.statusBar().showMessage(f"正在打开 {path.name} …")
+        token = self._load_controller.begin(path, ctx.profile)
+        self._load_pending_token = token
+
+    def _on_load_progress(self, percent: int, message: str):
+        if not self._load_controller.is_current(self._load_pending_token):
+            return
+        self.load_progress.setValue(max(0, min(100, percent)))
+        self.load_progress.setFormat(f"{message}  %p%")
+
+    def _on_load_succeeded(self, token: int, doc):
+        if not self._load_controller.is_current(token):
+            return                       # 陈旧结果：已作废/被新加载取代
+        self._load_controller.finish(token)
+        path = self._load_pending_path
+        ctx = self._load_ctx
+        self._clear_load_state()
+        ctx.open_document(doc)
+        self._finish_open(ctx, path)
+
+    def _on_load_failed(self, token: int, message: str):
+        if not self._load_controller.is_current(token):
+            return
+        self._load_controller.finish(token)
+        self._clear_load_state()
+        QMessageBox.critical(self, "打开失败", message)
+        self.statusBar().showMessage("打开失败")
+
+    def _clear_load_state(self):
+        self._load_pending_token = 0
+        self._load_pending_path = None
+        self._load_ctx = None
+        self.load_progress.hide()
+        self.load_progress.setFormat("")
+
+    def closeEvent(self, event):
+        # 关窗口时作写在途加载：worker 回传的结果会被 is_current 判为陈旧丢弃，
+        # 避免信号落到已销毁的 widget 上。随后正常关闭。
+        self._load_controller.cancel_all()
+        self._load_pending_token = 0
+        super().closeEvent(event)
 
     # ---------------- 多文档标签 ----------------
     def _new_or_reuse_context(self) -> AppState:
@@ -981,6 +1080,11 @@ class MainWindow(QMainWindow):
         self._displayed_ctx_id = id(ctx)
 
     def _on_tab_changed(self, index: int):
+        if self._load_pending_token:
+            # 加载在途：切到尚未就绪的空 ctx 会让 _refresh_document 拿到 None doc。
+            self._rebuild_tabs()             # 复位标签栏到当前激活项
+            self.statusBar().showMessage("地图加载中，请稍候…")
+            return
         if not (0 <= index < len(self._contexts)):
             return
         if index == self._active_index and self.state is not None \
@@ -4210,19 +4314,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"已自动裁剪为 {nw}×{nh}（一条撤销可还原）")
 
     def _goto_tile(self):
-        """转到指定格坐标并居中（纯视图，不改文档）。"""
+        """转到指定格坐标并居中（纯视图，不改文档）。X/Y 一次输入、一次确认。"""
         doc = self.state.doc
         if doc is None:
             self.statusBar().showMessage("请先打开一张地图")
             return
-        col, ok1 = QInputDialog.getInt(
-            self, "转到图块", "列 (X):", 0, 0, doc.width - 1, 1)
-        if not ok1:
+        from ..widgets.goto_tile_dialog import GotoTileDialog
+        dlg = GotoTileDialog(self, max_col=doc.width - 1,
+                             max_row=doc.height - 1)
+        if dlg.exec() != QDialog.Accepted:
             return
-        row, ok2 = QInputDialog.getInt(
-            self, "转到图块", "行 (Y):", 0, 0, doc.height - 1, 1)
-        if not ok2:
-            return
+        col, row = dlg.values()
         self.view.centerOn(QPointF(
             (col + 0.5) * doc.tile_w, (row + 0.5) * doc.tile_h))
         self.statusBar().showMessage(f"已转到图块 ({col}, {row})")

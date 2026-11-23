@@ -16,6 +16,14 @@ from .xml_preserve import iter_elements, serialize
 
 _SHAPE_TAGS = {"ellipse", "point", "polygon", "polyline", "text", "image"}
 
+# 编辑器内部类型 -> 游戏认识的 type。新增的「随机生成单位」只是属性模板不同
+# （randomUnits），对铁锈战争仍是 unitAdd，不能把内部 key 写进 TMX。
+GAME_TYPE_ALIASES = {
+    "unitAddRandom": "unitAdd",
+    # 地图初始单位在 TMX 里没有 type，游戏靠 unit + team 识别；写回空串
+    "mapUnit": "",
+}
+
 # 铁锈战争把这些属性按整数解析；若写出空字符串 ''，游戏会报
 # "Unexpected integer value:''" 并拒绝加载地图（例如 team）。
 # 这些键值为空时直接跳过，不写入 TMX（游戏对缺失取默认值）。
@@ -130,8 +138,16 @@ def _write_object(element, obj) -> None:
         element.set("type", game_type)
         element.attrib.pop("class", None)
     elif obj.type_:
-        element.set(type_key, obj.type_)
-        element.attrib.pop(other_key, None)
+        # 编辑器内部的「随机生成单位」类型对外仍是 unitAdd：游戏只认 unitAdd，
+        # 随机刷兵靠 randomUnits 属性展开成 spawnChance 表达，不另造 type。
+        # 「地图初始单位」映射成空 type（游戏靠 unit + team 识别），同样不写出。
+        game_type_for_obj = GAME_TYPE_ALIASES.get(obj.type_, obj.type_)
+        if game_type_for_obj:
+            element.set(type_key, game_type_for_obj)
+            element.attrib.pop(other_key, None)
+        else:
+            element.attrib.pop("type", None)
+            element.attrib.pop("class", None)
     else:
         element.attrib.pop("type", None)
         element.attrib.pop("class", None)

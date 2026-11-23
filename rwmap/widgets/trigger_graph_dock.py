@@ -54,7 +54,7 @@ from ..theme import ASH, INK, PANEL_BORDER_QSS, TEXT, TEXT_DIM, qc
 from .dock_chrome import install_title_bar
 from .trigger_inspector import (
     EDGE_COLORS, THEME, TYPE_COLORS, TriggerInspector, color_for,
-    prop_label, summary_keys, type_hint, type_label,
+    effective_type, prop_label, summary_keys, type_hint, type_label,
 )
 
 # ---- 节点几何 ----
@@ -440,7 +440,7 @@ class NodeItem(QGraphicsObject):
         clip.addRoundedRect(rect, 7, 7)
         painter.setClipPath(clip)
         painter.fillRect(QRectF(0, 0, NODE_W, HEADER_H),
-                         QBrush(_type_color(obj.type_)))
+                         QBrush(_type_color(effective_type(obj))))
         painter.restore()
         painter.setPen(QPen(QColor(INK)))
         painter.setBrush(Qt.NoBrush)
@@ -476,14 +476,16 @@ class NodeItem(QGraphicsObject):
         painter.setPen(QPen(_MUTED))
         painter.drawText(QRectF(9, y, 74, 14), Qt.AlignLeft, "类型")
         painter.setPen(QPen(QColor(TEXT)))
+        etype = effective_type(obj)
+        type_text = type_label(etype) if etype else "未分类"
         painter.drawText(QRectF(84, y, NODE_W - 93, 14), Qt.AlignRight,
-                         _elide(painter, type_label(obj.type_), NODE_W - 95))
+                         _elide(painter, type_text, NODE_W - 95))
         y += 16
 
         props = obj.properties
         rows: list[tuple[str, str]] = []
         max_rows = 2 if self.group else 3
-        for key in summary_keys(obj.type_) + tuple(props.values.keys()):
+        for key in summary_keys(effective_type(obj)) + tuple(props.values.keys()):
             if (key == "id" or key in LINK_PROPS
                     or key in HIDDEN_EDITOR_PROPERTIES
                     or any(r[0] == key for r in rows)):
@@ -497,7 +499,7 @@ class NodeItem(QGraphicsObject):
         if not rows:
             painter.setPen(QPen(QColor(TEXT_DIM)))
             painter.drawText(QRectF(9, y, NODE_W - 18, 14), Qt.AlignLeft,
-                             _elide(painter, type_hint(obj.type_), NODE_W - 18))
+                             _elide(painter, type_hint(effective_type(obj)), NODE_W - 18))
         for key, value in rows:
             painter.setPen(QPen(_MUTED))
             painter.drawText(QRectF(9, y, 74, 14), Qt.AlignLeft,
@@ -572,12 +574,128 @@ def _edge_path(a: QPointF, b: QPointF, lane: int, total: int) -> QPainterPath:
     return path
 
 
-def _paint_arrow(painter: QPainter, path: QPainterPath, col: QColor,
-                 scale: float = 1.0):
-    """在曲线终点画箭头（EdgeItem 与全局连线层共用）。
+# 连线绘制的不可变资源：QPen/QBrush/QColor 每帧重建几千次是纯浪费。
+# 按 (颜色, alpha) 缓存，setPen/setBrush 仍需逐边调用（保持原来的绘制顺序），
+# 但对象创建与 setCosmetic 全部省掉；像素结果与现建现画完全一致。
+def _edge_controls(a: QPointF, b: QPointF, lane: int, total: int):
+    """与 :func:`_edge_path` 完全一致的控制点（供曲线裁剪复用）。"""
+    dx = max(56.0, abs(b.x() - a.x()) * 0.45)
+    bow = (lane - (total - 1) / 2.0) * 46.0
+    return (a, QPointF(a.x() + dx, a.y() + bow),
+            QPointF(b.x() - dx, b.y() + bow), b)
 
-    ``scale`` 用于概览模式：场景单位会随缩放一起变小，传 ``1/zoom`` 才能让
-    箭头在屏幕上始终是固定大小，不会因为缩小就看不见。
+
+def _cubic_at(c: tuple, t: float) -> QPointF:
+    """三次贝塞尔取点（不用 pointAtPercent 的弧长积分）。"""
+    u = 1.0 - t
+    a, b, d, e = c
+    w0, w1, w2, w3 = u*u*u, 3*u*u*t, 3*u*t*t, t*t*t
+    return QPointF(w0*a.x() + w1*b.x() + w2*d.x() + w3*e.x(),
+                   w0*a.y() + w1*b.y() + w2*d.y() + w3*e.y())
+
+
+def _lerp_point(a: QPointF, b: QPointF, t: float) -> QPointF:
+    return QPointF(a.x() + (b.x() - a.x()) * t,
+                   a.y() + (b.y() - a.y()) * t)
+
+
+def _split_cubic(c: tuple, t: float):
+    """De Casteljau 切成左右两段子曲线。"""
+    a, b, d, e = c
+    ab, bd, de = _lerp_point(a, b, t), _lerp_point(b, d, t), _lerp_point(d, e, t)
+    abd, bde = _lerp_point(ab, bd, t), _lerp_point(bd, de, t)
+    mid = _lerp_point(abd, bde, t)
+    return (a, ab, abd, mid), (mid, bde, de, e)
+
+
+def _sub_cubic(c: tuple, t0: float, t1: float):
+    """取 [t0, t1] 区间的子曲线控制点。"""
+    left, _ = _split_cubic(c, t1)
+    _, right = _split_cubic(left, t0 / t1 if t1 else 0.0)
+    return right
+
+
+def _visible_t_range(c: tuple, visible: QRectF, samples: int | None = None):
+    """曲线落在（外扩后的）视口里的参数区间。
+
+    真实图的连线跨度中位数 3.2 万场景单位、视口只有 2775 —— 整条曲线光栅化
+    每条要 1.5ms，于是 5000 多条线能把一帧拖到 10 秒。这里采样找到与视口相交
+    的 t 区间，并把端点各外扩一个采样步长（再留 400 场景单位余量），确保绘制
+    的子曲线端点一定在视口外：视口内的抗锯齿像素与画整条曲线逐像素一致，
+    FlatCap 端帽也完全落在不可见区。
+    """
+    chord = math.hypot(c[3].x() - c[0].x(), c[3].y() - c[0].y())
+    if chord <= visible.width() + visible.height():
+        return 0.0, 1.0       # 短曲线：整条画比裁剪更便宜
+    margin = max(400.0, visible.width() * 0.12, visible.height() * 0.12)
+    x0, y0 = visible.left() - margin, visible.top() - margin
+    x1, y1 = visible.right() + margin, visible.bottom() + margin
+    # 采样步长必须小于「外扩视口的短边」，否则超长曲线可能一个采样点都落不进
+    # 视口，误判成整条可见（测试里 6 万单位曲线 / 800 单位视口就踩到过）。
+    step_target = min(visible.width(), visible.height()) * 0.5 + margin
+    if samples is None:
+        samples = max(24, min(512, int(chord / max(1.0, step_target)) + 2))
+    hits = []
+    for i in range(samples + 1):
+        t = i / samples
+        p = _cubic_at(c, t)
+        if x0 <= p.x() <= x1 and y0 <= p.y() <= y1:
+            hits.append(t)
+    if not hits:
+        # 采样点全落在外扩视口外：极端情况下曲线可能仍穿过视口，保守画整条。
+        return 0.0, 1.0
+    return max(0.0, hits[0] - 1.0 / samples), min(1.0, hits[-1] + 1.0 / samples)
+
+
+def _clipped_path(ctrl: tuple, visible: QRectF, cache_key, cache: dict):
+    """返回适合当前视口的绘制路径；结果按 (几何签名, 视口) 缓存。"""
+    if cache_key in cache:
+        return cache[cache_key]
+    t0, t1 = _visible_t_range(ctrl, visible)
+    if t0 <= 0.0 and t1 >= 1.0:
+        # 短曲线 / 整条都可见：直接复用完整 path，不额外构造。
+        cache[cache_key] = None
+        return None
+    sub = _sub_cubic(ctrl, t0, t1)
+    path = QPainterPath(sub[0])
+    path.cubicTo(sub[1], sub[2], sub[3])
+    cache[cache_key] = path
+    return path
+
+
+_EDGE_RESOURCES: dict[tuple, tuple[QColor, QPen, QBrush, QPen]] = {}
+_EDGE_QCOLORS: dict[str, QColor] = {}
+
+
+def _edge_color(kind: str) -> QColor:
+    """连线类型 -> QColor，只构造一次（2000 条边每帧少 2000 次 QColor 解析）。"""
+    c = _EDGE_QCOLORS.get(kind)
+    if c is None:
+        c = QColor(EDGE_SPECS[kind][1])
+        _EDGE_QCOLORS[kind] = c
+    return c
+
+
+def _edge_resources(col: QColor) -> tuple[QColor, QPen, QBrush, QPen]:
+    key = (col.rgb(), col.alpha())
+    got = _EDGE_RESOURCES.get(key)
+    if got is None:
+        c = QColor(col)
+        pen = QPen(c, 1.8)
+        pen.setCosmetic(True)
+        brush = QBrush(c)
+        no_pen = QPen(Qt.NoPen)
+        got = (c, pen, brush, no_pen)
+        _EDGE_RESOURCES[key] = got
+    return got
+
+
+def _arrow_unit(path: QPainterPath):
+    """缓存一条曲线的箭头几何（终点 + 单位方向 + scale=1 的三角形）。
+
+    ``QPainterPath.pointAtPercent`` 内部要按弧长做数值积分，2000 条边就是
+    4000 次积分（实测 ~16ms）；曲线本身只在端点移动时才变化，几何完全可以
+    跟着曲线一起缓存。三角形顶点按原来的公式算，保证像素结果不变。
     """
     end = path.pointAtPercent(1.0)
     near = path.pointAtPercent(0.975)
@@ -585,39 +703,72 @@ def _paint_arrow(painter: QPainter, path: QPainterPath, col: QColor,
     length = math.hypot(v.x(), v.y()) or 1.0
     ux, uy = v.x() / length, v.y() / length
     px, py = -uy, ux
-    size, half = 10.0 * scale, 4.5 * scale
-    tip = QPointF(end.x() - scale, end.y())
-    arrow = QPolygonF([
+    size, half = 10.0, 4.5
+    tip = QPointF(end.x() - 1.0, end.y())
+    poly = QPolygonF([
         tip,
         QPointF(tip.x() - ux * size + px * half,
                 tip.y() - uy * size + py * half),
         QPointF(tip.x() - ux * size - px * half,
                 tip.y() - uy * size - py * half),
     ])
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QBrush(col))
-    painter.drawPolygon(arrow)
+    return (end, ux, uy, px, py, poly)
+
+
+def _arrow_scaled(unit, scale: float) -> QPolygonF:
+    """按 scale 生成箭头三角形；公式与优化前逐字一致。"""
+    if scale == 1.0:
+        return unit[5]
+    end, ux, uy, px, py, _ = unit
+    size, half = 10.0 * scale, 4.5 * scale
+    tip = QPointF(end.x() - scale, end.y())
+    return QPolygonF([
+        tip,
+        QPointF(tip.x() - ux * size + px * half,
+                tip.y() - uy * size + py * half),
+        QPointF(tip.x() - ux * size - px * half,
+                tip.y() - uy * size - py * half),
+    ])
+
+
+def _paint_arrow(painter: QPainter, path: QPainterPath, col: QColor,
+                 scale: float = 1.0, unit=None):
+    """在曲线终点画箭头（EdgeItem 与全局连线层共用）。
+
+    ``scale`` 用于概览模式：场景单位会随缩放一起变小，传 ``1/zoom`` 才能让
+    箭头在屏幕上始终是固定大小，不会因为缩小就看不见。
+    ``unit`` 是 :func:`_arrow_unit` 的缓存结果；调用方复用曲线时一并传入即可
+    免掉弧长积分。未传时本函数自己算，旧调用方无需改动。
+    """
+    if unit is None:
+        unit = _arrow_unit(path)
+    _, _, brush, no_pen = _edge_resources(col)
+    painter.setPen(no_pen)
+    painter.setBrush(brush)
+    painter.drawPolygon(_arrow_scaled(unit, scale))
 
 
 def _paint_edge_curve(painter: QPainter, a: "GraphNode", b: "GraphNode",
                       lane: int, total: int, col: QColor, zoom: float,
-                      overview: bool = False):
+                      overview: bool = False, geom=None):
     """按数据层坐标画一条完整的贝塞尔连线 + 箭头。
 
     细节模式、端点未 live 的补画、以及**缩小后的概览模式**都走这里：概览不再
     退化成中心点直线，线的形状 / 车道偏移 / 端点位置与放大后完全一致。
     cosmetic 笔宽按屏幕像素固定，缩到 0.05 倍时线也不会细到看不见；箭头按
     1/zoom 放大成场景单位，屏幕上仍是固定大小。
+    ``geom`` 可传入 :func:`_arrow_unit` 的缓存，供复用同一条曲线的调用方使用。
     """
     pa, pb = _edge_endpoints(a, b)
     path = _edge_path(pa, pb, lane, total)
-    pen = QPen(col, 1.8)
-    pen.setCosmetic(True)
+    if geom is None:
+        geom = _arrow_unit(path)
+    _, pen, _, _ = _edge_resources(col)
     painter.setPen(pen)
     painter.setBrush(Qt.NoBrush)
     painter.drawPath(path)
     scale = 1.0 / max(zoom, 0.05) if overview else 1.0
-    _paint_arrow(painter, path, col, scale)
+    _paint_arrow(painter, path, col, scale, geom)
 
 
 class EdgeItem(QGraphicsItem):
@@ -637,6 +788,9 @@ class EdgeItem(QGraphicsItem):
         self._path = QPainterPath()
         self._rect = QRectF()
         self._label_pos = QPointF()
+        # 曲线/箭头几何跟着 rebuild 更新，paint 每帧只做 Qt 绘制调用。
+        self._arrow_geom = None
+        self._color = QColor(self.color)
         self.rebuild()
         src.edges.append(self)
         dst.edges.append(self)
@@ -653,6 +807,7 @@ class EdgeItem(QGraphicsItem):
                           0.5 + (self.lane - (self.total - 1) / 2.0) * 0.20))
         self._label_pos = path.pointAtPercent(t) + QPointF(0, -8 - self.lane * 11)
         self._rect = path.boundingRect().adjusted(-46, -60, 46, 46)
+        self._arrow_geom = _arrow_unit(path)
         self.update()
 
     def boundingRect(self):
@@ -663,19 +818,24 @@ class EdgeItem(QGraphicsItem):
         return QPainterPath()
 
     def paint(self, painter: QPainter, _option, _widget=None):
-        col = QColor(self.color)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        # cosmetic 笔宽：按屏幕像素固定，缩放时连线粗细不变（与全局连线层一致）
-        pen = QPen(col, 1.8)
-        pen.setCosmetic(True)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawPath(self._path)
+        col = self._color
+        scene = self.scene()
+        dock = getattr(scene, "dock", None) if scene is not None else None
+        gpu_mode = bool(getattr(dock, "_gpu_edges", False))
+        if not gpu_mode:
+            _, pen, brush, no_pen = _edge_resources(col)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            # cosmetic 笔宽：按屏幕像素固定，缩放时连线粗细不变（与全局连线层一致）
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(self._path)
 
-        # 终点箭头
-        _paint_arrow(painter, self._path, col)
+            # 终点箭头（几何在 rebuild 时算好，不再逐帧做弧长积分）
+            painter.setPen(no_pen)
+            painter.setBrush(brush)
+            painter.drawPolygon(self._arrow_geom[5])
 
-        # 标签
+        # 标签：GPU 模式下仍由 QPainter 画（在上层 QGraphicsView 里）
         f = QFont(painter.font())
         f.setPointSize(8)
         painter.setFont(f)
@@ -732,7 +892,8 @@ class GraphOverviewItem(QGraphicsItem):
         painter.setRenderHint(QPainter.Antialiasing, self._draw_edges)
         exposed = option.exposedRect if option is not None else None
         cull = exposed is not None and not exposed.isEmpty()
-        if self._draw_edges:
+        gpu_mode = getattr(self.dock, "_gpu_edges", False)
+        if self._draw_edges and not gpu_mode:
             col = qc(ASH, 110)
             view = self.dock.view
             zoom = view.zoom() if view is not None else 1.0
@@ -755,7 +916,7 @@ class GraphOverviewItem(QGraphicsItem):
             box = QRectF(n.x, n.y, NODE_W, NODE_H)
             if cull and not exposed.intersects(box):
                 continue
-            col = _type_color(n.obj.type_)
+            col = _type_color(effective_type(n.obj))
             painter.setPen(QPen(QColor(INK), 1.0))
             painter.setBrush(QBrush(col))
             painter.drawRect(box)
@@ -783,6 +944,11 @@ class GraphEdgeLayerItem(QGraphicsItem):
         self.setFlag(QGraphicsItem.ItemUsesExtendedStyleOption, True)
         self._rect = QRectF(0, 0, 1, 1)
         self._boxes: dict[int, QRectF] = {}
+        # id(e) -> (端点/车道签名, QPainterPath, 箭头几何)。曲线只在节点移动时变，
+        # 重绘时按签名比对即可复用，省掉每帧几千次弧长积分与路径构造。
+        self._geom_cache: dict[int, tuple] = {}
+        # (几何签名, 视口) -> 裁剪后的 QPainterPath；None = 整条曲线可见。
+        self._clip_cache: dict[tuple, QPainterPath | None] = {}
 
     def _edge_box(self, e, nodes) -> QRectF | None:
         """一条边的裁剪盒：两端节点框 + 整条贝塞尔曲线的凸包，再放宽余量。
@@ -823,6 +989,8 @@ class GraphEdgeLayerItem(QGraphicsItem):
         for n in nodes.values():
             r |= QRectF(n.x, n.y, NODE_W, NODE_H)
         self._boxes = boxes
+        self._geom_cache.clear()
+        self._clip_cache.clear()
         self.prepareGeometryChange()
         self._rect = (r.adjusted(-120, -120, 120, 120)
                       if not r.isEmpty() else QRectF(0, 0, 1, 1))
@@ -868,6 +1036,8 @@ class GraphEdgeLayerItem(QGraphicsItem):
 
     def paint(self, painter, option, _widget=None):
         dock = self.dock
+        if getattr(dock, "_gpu_edges", False):
+            return                      # GPU 模式：全部边由 GL 层统一绘制
         overview = dock._overview_item is not None
         active = dock._active_cache
         if active is None:
@@ -903,10 +1073,33 @@ class GraphEdgeLayerItem(QGraphicsItem):
             box = self._boxes.get(eid)
             if visible is not None and box is not None and not visible.intersects(box):
                 continue
-            col = QColor(EDGE_SPECS[e.kind][1])
+            col = _edge_color(e.kind)
             lane, total = dock._edge_lanes.get(eid, (0, 1))
-            _paint_edge_curve(painter, a, b, lane, total, col, zoom,
-                              overview)
+            sig = (a.x, a.y, b.x, b.y, lane, total)
+            geom = self._geom_cache.get(eid)
+            if geom is None or geom[0] != sig:
+                pa, pb = _edge_endpoints(a, b)
+                ctrl = _edge_controls(pa, pb, lane, total)
+                path = _edge_path(pa, pb, lane, total)
+                geom = (sig, path, _arrow_unit(path), ctrl)
+                self._geom_cache[eid] = geom
+            draw_path = geom[1]
+            if visible is not None:
+                clip_key = (sig, visible.left(), visible.top(),
+                            visible.right(), visible.bottom())
+                clipped = _clipped_path(geom[3], visible, clip_key,
+                                        self._clip_cache)
+                if clipped is not None:
+                    draw_path = clipped
+            _, pen, brush, no_pen = _edge_resources(col)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(draw_path)
+            # 与 _paint_arrow 完全相同的绘制顺序（概览按 1/zoom 放大箭头）
+            scale = 1.0 / max(zoom, 0.05) if overview else 1.0
+            painter.setPen(no_pen)
+            painter.setBrush(brush)
+            painter.drawPolygon(_arrow_scaled(geom[2], scale))
 
 
 # ---------------------------------------------------------------- 视图 / 场景
@@ -918,7 +1111,22 @@ class GraphScene(QGraphicsScene):
         self.setBackgroundBrush(QBrush(_BG))
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
-        """网页版 #canvas 的深色 + 24px 圆点网格（纹理平铺，缩放时不重画）。"""
+        """网页版 #canvas 的深色 + 24px 圆点网格（纹理平铺，缩放时不重画）。
+
+        GPU 模式下：QOpenGLWidget 是 view 的 viewport，这里在 QPainter 的
+        native painting 区块里直接调用 GL 渲染器画「点阵 + 全部连线 + 箭头」。
+        节点/标签仍由 QPainter 在此之后正常绘制（z 值更高，自然盖在连线上）。
+        """
+        if getattr(self.dock, "_gpu_edges", False) and self.dock._gl_widget is not None:
+            eng = self.dock._gl_widget.engine()
+            if eng.ready:
+                self.dock._gpu_sync_geometry()   # 有 dirty 才重打包上传
+                painter.beginNativePainting()
+                try:
+                    eng.render()
+                finally:
+                    painter.endNativePainting()
+            return
         painter.fillRect(rect, _BG)
         painter.fillRect(rect, self._dots)
 
@@ -972,6 +1180,7 @@ class GraphView(QGraphicsView):
         # 边缘判定区（四周窄带）此前会在拖动节点时画半透明色条，按用户要求隐藏：
         # 只保留「进入边缘持续滚动」的功能逻辑（_edge_direction / 定时器），
         # 不再有任何可见提示。判定的功能测试不依赖绘制，故直接去掉绘制段。
+        #
         super().paintEvent(event)
 
     def zoom(self) -> float:
@@ -1111,16 +1320,22 @@ class GraphView(QGraphicsView):
             self.scene().removeItem(self._band)
             self._band = None
             dock = self.scene().dock
-            # 右键「单击」空白（没有拉出选区）：已有选中对象时当作菜单入口，
-            # 方便框选后在空白处右键批量移动 / 删除；右键拖拽仍是原来的框选。
+            # 右键「单击」空白（没有拉出选区）= 取消选择，不弹菜单。
+            # 菜单只在右键点中节点对象时弹；批量操作入口是「框选后右键
+            # 其中一个节点」，不再是空白处右键。右键拖拽仍是原来的框选。
             p0 = self.mapFromScene(rect.topLeft())
             p1 = self.mapFromScene(rect.bottomRight())
             if abs(p1.x() - p0.x()) < 6 and abs(p1.y() - p0.y()) < 6:
-                if dock._selected_keys:
-                    dock.node_context_menu().exec(
-                        self.viewport().mapToGlobal(event.pos()))
-                else:
+                # 必须同时清场景选中态与数据层 _selected_keys：选中节点可能
+                # 已被视口虚拟化回收，scene().clearSelection() 此时不会触发
+                # selectionChanged，数据层残留会让下次误操作整批节点。
+                self.scene().blockSignals(True)
+                try:
                     self.scene().clearSelection()
+                finally:
+                    self.scene().blockSignals(False)
+                dock._selected_keys = set()
+                dock._clear_detail()
                 event.accept()
                 return
             items = [i for i in dock.node_items.values()
@@ -1341,6 +1556,25 @@ class TriggerGraphDock(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("触发器节点图", parent)
         self.setObjectName("panels.trigger_graph")
+        # ---- 可选 GPU 连线渲染（lazy，失败即回退 QPainter，行为不变）----
+        self._gpu_edges = False
+        self._gpu_reason = "未探测"
+        self._gl_widget = None
+        try:
+            from ..view.graph_gpu_renderer import (
+                probe_gl_environment, make_gl_widget_class,
+            )
+            self._gpu_edges, self._gpu_reason = probe_gl_environment()
+            if self._gpu_edges:
+                klass = make_gl_widget_class()
+                if klass is None:
+                    self._gpu_edges = False
+                    self._gpu_reason = "GL widget 类不可用"
+                else:
+                    self._gl_widget = klass(self)
+        except Exception:                          # noqa: BLE001 - 任何异常都回退
+            self._gpu_edges = False
+            self._gpu_reason = "GPU 模块导入失败"
         # 浮动状态下本 dock 是独立顶层窗口：右键菜单事件冒泡到这里时，若仍是
         # 默认策略会弹出一个空的原生菜单（一闪而过的空框）。顶层一律关掉。
         self.setContextMenuPolicy(Qt.NoContextMenu)
@@ -1480,7 +1714,29 @@ class TriggerGraphDock(QDockWidget):
         self.inspector = TriggerInspector()
         self.inspector.setMinimumWidth(260)
         splitter = QSplitter(Qt.Horizontal, holder)
-        splitter.addWidget(self.view)
+        if self._gl_widget is not None and self._gpu_edges:
+            # GPU 模式（方案 B）：QOpenGLWidget 直接作为 QGraphicsView 的 viewport。
+            # GL 在 GraphScene.drawBackground 里通过 painter.beginNativePainting()
+            # 画点阵 + 全部连线，节点/标签/框选仍由 QPainter 画在同一画布上，层级
+            # 由 QGraphicsItem 的 z 值天然保证，鼠标逻辑零改动（viewport() 仍是它）。
+            #
+            # 【为何不采用「GL 底层控件 + 透明 view 叠加」的双层方案】
+            # Windows 下 QOpenGLWidget 与 QGraphicsView 都是原生 HWND，两者叠加时
+            # 上面的会完全遮挡下面的；且被遮挡的 GL 窗口不再收到暴露事件 → 不重绘。
+            # 实测：GL 置顶则节点消失、view 置顶则连线消失，无解。故改为单一 viewport。
+            self.view.setViewport(self._gl_widget)
+            # setViewport 换掉了默认 viewport，需把原本挂在 viewport 上的鼠标策略
+            # 重新应用到新的 QOpenGLWidget（见 GraphView.__init__）。
+            self.view.viewport().setContextMenuPolicy(Qt.NoContextMenu)
+            self.view.viewport().setMouseTracking(True)
+            # context 丢失时自动回退
+            ctx = self._gl_widget.context()
+            if ctx is not None:
+                ctx.aboutToBeDestroyed.connect(
+                    lambda: self._on_gl_failed("GL context 销毁"))
+            splitter.addWidget(self.view)
+        else:
+            splitter.addWidget(self.view)
         splitter.addWidget(self.inspector)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
@@ -1589,6 +1845,7 @@ class TriggerGraphDock(QDockWidget):
         # 视口内的线裁掉（拖完节点后有的连线消失）。
         self.edge_layer.refresh_node_boxes(key)
         self.edge_layer.update()
+        self._gpu_mark_dirty()
         # 节点位置已同步到 data，重算动态平移范围（可增可减）
         self._ensure_scene_rect()
 
@@ -1973,6 +2230,8 @@ class TriggerGraphDock(QDockWidget):
         finally:
             # active 集合 / live 边集合变了，全局连线层重画补位
             self.edge_layer.update()
+            # 视口/缩放变了：clip 区间随之变化，GPU 几何需重算
+            self._gpu_mark_dirty()
 
     def _rebuild_live(self, needed: set, active: set, _rect):
         """按 needed 集合增删 live 节点/连线（needed=None 表示全量构建）。"""
@@ -2065,6 +2324,9 @@ class TriggerGraphDock(QDockWidget):
             self._pos_cache[key] = QPointF(node.x, node.y)
 
         self.edge_layer.set_content()
+        if hasattr(self, "_gpu_clip_cache"):
+            self._gpu_clip_cache.clear()
+        self._gpu_mark_dirty()
         self.scene.blockSignals(False)
         self._loading = False
         # 只建视口内（或概览）的对象，其余按需增删
@@ -2828,11 +3090,136 @@ class TriggerGraphDock(QDockWidget):
         dangling = f" · 悬空引用 {self.data.dangling}" if self.data.dangling else ""
         layers = "、".join(self.data.layer_names) or "无对象层"
         zoom = self.view.zoom() * 100
+        renderer = " · 连线 GPU" if self._gpu_edges else " · 连线 QPainter"
         if self._overview_item is not None:
             self.status.setText(
                 f"概览模式 · 全量节点 {total} · 当前显示 {vis} · 连线 {edges}"
-                f" · 缩放 {zoom:.0f}%{dangling} · 双击放大进入细节可编辑")
+                f" · 缩放 {zoom:.0f}%{dangling}{renderer} · 双击放大进入细节可编辑")
             return
         self.status.setText(
             f"对象层：{layers} · 全量节点 {total} · 当前显示 {vis}（已建 {live}）"
-            f" · 连线 {edges} · 缩放 {zoom:.0f}%{dangling} · 右侧属性可编辑")
+            f" · 连线 {edges} · 缩放 {zoom:.0f}%{dangling}{renderer} · 右侧属性可编辑")
+
+    # ---- 可选 GPU 连线渲染 ----
+    def graph_viewport_matrix(self):
+        """场景坐标 -> GL 设备像素的仿射 (a, d, tx, ty)，供 shader uniform。
+
+        QGraphicsView 的变换是各向同性 scale（无旋转/剪切），view 的
+        ``mapToScene(0,0)`` 是视口左上角对应的场景点。反过来：
+        ``px = (scene - tl) * zoom * dpr``。
+        """
+        vp = self.view.viewport()
+        w = vp.width() if vp is not None else 1
+        h = vp.height() if vp is not None else 1
+        tl = self.view.mapToScene(0, 0)
+        zoom = self.view.zoom()
+        dpr = self.view.devicePixelRatioF()   # QWidget 有 devicePixelRatioF
+        a = zoom * dpr
+        return (a, a, -tl.x() * a, -tl.y() * a)
+
+    def _on_gl_failed(self, reason: str):
+        """GL 初始化/context 丢失：立即回退 QPainter，刷新画面。"""
+        if not self._gpu_edges and self._gl_widget is None:
+            return
+        was_gpu = self._gpu_edges
+        self._gpu_edges = False
+        self._gpu_reason = reason
+        if was_gpu:
+            # 方案 B：GL 是 view 的 viewport，回退时必须换回普通 QWidget，
+            # 否则 QPainter 会在失效的 GL 画布上画 → 黑屏。
+            from PySide6.QtWidgets import QWidget as _QWidget
+            try:
+                plain = _QWidget()
+                self.view.setViewport(plain)
+                plain.setContextMenuPolicy(Qt.NoContextMenu)
+                plain.setMouseTracking(True)
+            except RuntimeError:                   # 控件已销毁
+                pass
+        self.view.viewport().update()
+        self.edge_layer.update()
+        if self._overview_item is not None:
+            self._overview_item.update()
+
+    def _gpu_collect_instances(self):
+        """从现有缓存/数据产出 EdgeInstance 列表（GPU 与 QPainter 共用几何真源）。"""
+        from ..view.graph_gpu_renderer import (
+            EdgeInstance, clip_ctrl_for_view, arrow_scale_for,
+        )
+        dock = self
+        active = dock._active_cache
+        if active is None:
+            active = set(dock.data.nodes)
+        # GPU 模式下 EdgeItem/全局层/概览层的 QPainter 边全部被守卫跳过，
+        # 因此这里必须收集所有可见边（含 live 端点），不能按 live_edges 过滤。
+        nodes = dock.data.nodes
+        layer = dock.edge_layer
+        overview = dock._overview_item is not None
+        zoom = dock.view.zoom()
+
+        vp = dock.view.viewport()
+        visible = None
+        if vp is not None and vp.width() > 0 and vp.height() > 0:
+            from PySide6.QtCore import QRectF as _QRectF
+            visible = _QRectF(dock.view.mapToScene(0, 0),
+                              dock.view.mapToScene(vp.width(), vp.height()))
+
+        out = []
+        for e in dock.data.edges:
+            eid = id(e)
+            if e.src not in active or e.dst not in active:
+                continue
+            a, b = nodes.get(e.src), nodes.get(e.dst)
+            if a is None or b is None:
+                continue
+            box = layer._boxes.get(eid)
+            if visible is not None and box is not None and not visible.intersects(box):
+                continue
+            col = _edge_color(e.kind) if not overview else qc(ASH, 110)
+            lane, total = dock._edge_lanes.get(eid, (0, 1))
+            sig = (a.x, a.y, b.x, b.y, lane, total)
+            geom = layer._geom_cache.get(eid)
+            if geom is None or geom[0] != sig:
+                pa, pb = _edge_endpoints(a, b)
+                ctrl = _edge_controls(pa, pb, lane, total)
+                path = _edge_path(pa, pb, lane, total)
+                geom = (sig, path, _arrow_unit(path), ctrl)
+                layer._geom_cache[eid] = geom
+            ctrl = geom[3]
+            clip_key = ((sig, visible.left(), visible.top(),
+                         visible.right(), visible.bottom())
+                        if visible is not None else None)
+            if not hasattr(dock, "_gpu_clip_cache"):
+                dock._gpu_clip_cache = {}
+            clipped = clip_ctrl_for_view(ctrl, visible, clip_key,
+                                         dock._gpu_clip_cache)
+            if clipped is not None:
+                ctrl = clipped
+            # 统一成 (x, y) 元组：未裁剪时 ctrl 是 QPointF 元组，裁剪后已是元组
+            ctrl_xy = tuple((p.x(), p.y()) if hasattr(p, "x") else (p[0], p[1])
+                            for p in ctrl)
+            unit = geom[2]
+            end = unit[0]
+            direction = (unit[1], unit[2])
+            scale = arrow_scale_for(zoom, overview)
+            out.append(EdgeInstance(
+                eid=eid, ctrl=ctrl_xy,
+                color=(col.redF(), col.greenF(), col.blueF(), col.alphaF()),
+                tip=(end.x(), end.y()), direction=direction,
+                has_arrow=True, overview=overview, scale=scale))
+        return out
+
+    def _gpu_sync_geometry(self):
+        """paintGL 前调用：有 dirty 就重算实例并上传。"""
+        if not self._gpu_edges or self._gl_widget is None:
+            return
+        engine = self._gl_widget.engine()
+        if not engine._geometry_dirty and engine._instance_count > 0:
+            return
+        instances = self._gpu_collect_instances()
+        from ..view.graph_gpu_renderer import pack_edge_instances
+        engine.set_geometry(pack_edge_instances(instances), len(instances))
+
+    def _gpu_mark_dirty(self):
+        if self._gpu_edges and self._gl_widget is not None:
+            self._gl_widget.engine().mark_geometry_dirty()
+            self._gl_widget.update()

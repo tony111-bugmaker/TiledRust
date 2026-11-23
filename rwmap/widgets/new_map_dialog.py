@@ -52,24 +52,41 @@ def _default_selected(label: str) -> bool:
 
 
 def build_new_document(profile, width: int, height: int, tsx_paths: list[str]):
-    """构建新地图文档：空白 Ground 瓦片层 + 勾选的外部图集引用。
+    """构建新地图文档：铁锈标准 5 层 + 勾选的外部图集引用。
 
     纯函数式构造，不走撤销栈（文档还没挂到窗口上下文）。
     """
+    doc = create_blank_document(profile, width, height)
+    # 关键：外部 .tsx 不写 tilecount，靠 <image> 指向的 PNG 实际尺寸推算。
+    # 没有 resolver 时 read_tsx 只能拿到 0 → GID 段全重叠 → 图块集面板空白。
+    from ..io.path_resolver import ResourceResolver
+    doc.resolver = ResourceResolver(doc.path, profile)
+
     # 瓦片尺寸：优先取第一个可读取图集里写明的尺寸，否则用铁锈默认 20。
     tile_w = tile_h = RW_TILE_SIZE
     for raw in tsx_paths:
         try:
-            probe = read_tsx(Path(raw), 1, None, Path(raw).name)
+            probe = read_tsx(Path(raw), 1, doc.resolver, Path(raw).name)
         except Exception:  # noqa: BLE001 - 读失败交给后面正式添加时提示
             continue
         tile_w, tile_h = max(1, probe.tile_w), max(1, probe.tile_h)
         break
+    doc.tile_w, doc.tile_h = tile_w, tile_h
+    doc.root.set("tilewidth", str(tile_w))
+    doc.root.set("tileheight", str(tile_h))
 
-    doc = create_blank_document(profile, width, height, tile_w, tile_h)
-    from ..document.layer import TileLayer
-    doc.layers = [TileLayer(width=width, height=height, name="Ground",
-                            cells=[0] * (width * height))]
+    # 和自带示例地图一致的图层骨架，新建即可直接画 / 放触发器 / 看自动映射。
+    from ..document.layer import ObjectLayer, TileLayer
+    cells = [0] * (width * height)
+    doc.layers = [
+        TileLayer(width=width, height=height, name="Ground", cells=list(cells)),
+        TileLayer(width=width, height=height, name="Items", cells=list(cells)),
+        TileLayer(width=width, height=height, name="Units", opacity=0.59,
+                  cells=list(cells)),
+        ObjectLayer(name="Triggers", readonly=True),
+        TileLayer(width=width, height=height, name="set", visible=False,
+                  opacity=0.25, cells=list(cells)),
+    ]
 
     base_dir = Path(doc.path).parent
     existing: set[str] = set()

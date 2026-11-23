@@ -285,8 +285,7 @@ class AsyncTileCacheTest(unittest.TestCase):
         self.assertGreater(len(sync_blocks), 0)
 
         # 清空后走异步重建（相同视口）
-        item._tile_cache.clear()
-        item._tile_lru.clear()
+        item._clear_tile_cache()
         item._tile_dirty_all = True
         item._async_tiles_override = True
         _render_item(item, scale=1.0, viewport=(1280, 960), center=(640, 480))
@@ -414,8 +413,7 @@ class AsyncTileCacheTest(unittest.TestCase):
                     item._tile_image(bx, by, 1.0, True)
                 sync = dict(item._tile_cache)
 
-                item._tile_cache.clear()
-                item._tile_lru.clear()
+                item._clear_tile_cache()
                 item._tile_dirty_all = True
                 item._async_tiles_override = True
                 _render_item(item, scale=1.0, viewport=(1280, 960), center=(640, 480))
@@ -443,6 +441,79 @@ class AsyncTileCacheTest(unittest.TestCase):
         _render_item(item, scale=1.0, viewport=(1280, 960), center=(640, 480))
         self.assertIn(key, item._tile_inflight, "失败后下一帧应能重试")
         _settle_all(item, QRectF(0, 0, 1280, 960), [key])
+
+
+class LowZoomSmoothFillTest(unittest.TestCase):
+    """低倍率缩小时的「从上往下逐块加载」修复回归。"""
+
+    def _item(self):
+        doc = _doc()
+        objs = [
+            MapObject(object_id=i, name=f"o{i}", shape="rect",
+                      x=(i * 137) % 600, y=(i * 89) % 500,
+                      width=14, height=12)
+            for i in range(260)
+        ]
+        return oli.ObjectLayerItem(ObjectLayer(name="T", objects=objs), doc)
+
+    def test_missing_block_draws_low_detail_overview_placeholder(self):
+        """未就绪块先贴整图占位，第一帧就有对象框，而不是空白逐块出现。"""
+        from unittest import mock
+
+        item = self._item()
+        item._scale = 0.1
+        item._async_tiles_override = True
+        idle_pool = mock.Mock()
+        with mock.patch.object(oli, "_tile_pool", return_value=idle_pool), \
+                mock.patch.object(oli.ObjectLayerItem, "_use_tile_cache",
+                                  return_value=True):
+            img = _render_item(item, scale=0.1, viewport=(640, 480),
+                               center=(300, 250))
+            self.assertIsNotNone(item._tile_overview,
+                                 "低倍率应生成整图占位图")
+            with_overview = sum(
+                1 for y in range(img.height()) for x in range(img.width())
+                if (img.pixel(x, y) >> 24) & 255)
+
+            item._tile_overview = None
+            with mock.patch.object(item, "_build_tile_overview", lambda: None):
+                img2 = _render_item(item, scale=0.1, viewport=(640, 480),
+                                    center=(300, 250))
+            without = sum(
+                1 for y in range(img2.height()) for x in range(img2.width())
+                if (img2.pixel(x, y) >> 24) & 255)
+            self.assertGreater(with_overview, without,
+                               "占位图应让缺块区域立刻出现对象框")
+
+    def test_low_lod_cache_not_limited_by_old_256_blocks(self):
+        """低 LOD 块 25KB，视口要近千块；按字节预算不能卡在 256 块。"""
+        item = self._item()
+        img = QImage(80, 80, QImage.Format_ARGB32)
+        img.fill(Qt.transparent)
+        for i in range(300):
+            item._put_tile((0.125, i, 0), img)
+        self.assertEqual(len(item._tile_cache), 300)
+        self.assertEqual(item._tile_bytes, 300 * 80 * 80 * 4)
+
+    def test_low_zoom_dispatch_is_center_out(self):
+        """派发顺序应从视口中心向外，避免视觉上从上往下刷。"""
+        item = self._item()
+        item._scale = 0.1
+        visible = QRectF(0, 0, 640 * 6, 640 * 6)
+        keys = item._ordered_tile_keys(visible, 0.125)
+        cx = visible.center().x() / oli._TILE_CACHE
+        cy = visible.center().y() / oli._TILE_CACHE
+        dist = [(bx + 0.5 - cx) ** 2 + (by + 0.5 - cy) ** 2
+                for bx, by in keys]
+        self.assertEqual(dist, sorted(dist))
+
+    def test_invalidation_discards_overview_placeholder(self):
+        item = self._item()
+        item._scale = 0.1
+        item._build_tile_overview()
+        self.assertIsNotNone(item._tile_overview)
+        item.refresh_all()
+        self.assertIsNone(item._tile_overview)
 
 
 if __name__ == "__main__":

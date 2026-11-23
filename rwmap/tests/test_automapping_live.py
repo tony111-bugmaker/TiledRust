@@ -293,6 +293,47 @@ class LiveAutoMappingUiTest(unittest.TestCase):
             w.act_automap_while.setChecked(False)
             QApplication_processEvents()
 
+    def test_fill_with_live_automap_updates_ground_and_undo_once(self):
+        """填充也要走实时自动映射：Ground 立刻更新，且整次填充只占一条撤销。"""
+        from PySide6.QtWidgets import QApplication
+        w = self.w
+        self._reset()
+        doc = w.state.doc
+        ground, set_layer = doc.layer_by_name("Ground"), doc.layer_by_name("set")
+        saved_set, saved_ground = list(set_layer.cells), list(ground.cells)
+        c0, r0 = 6, 6
+        try:
+            # 造一块被草地包围的小水域，保证洪水填充只覆盖这 36 格。
+            for r in range(r0 - 1, r0 + 7):
+                for c in range(c0 - 1, c0 + 7):
+                    inside = r0 <= r < r0 + 6 and c0 <= c < c0 + 6
+                    set_layer.cells[set_layer.index(c, r)] = 186 if inside else 126
+            before = [ground.get(c0 + dx, r0 + dy)
+                      for dx in (-1, 0, 1, 5, 6, 7) for dy in (-1, 0, 1, 5, 6, 7)]
+            count_before = w.state.undo_stack.count()
+            w._on_gid(126)                     # 选瓦片会自动切回画笔，再切填充
+            w._set_object_tool("fill")
+            w._on_press(c0 + 2, r0 + 2)
+            QApplication.processEvents()
+            after = [ground.get(c0 + dx, r0 + dy)
+                     for dx in (-1, 0, 1, 5, 6, 7) for dy in (-1, 0, 1, 5, 6, 7)]
+            self.assertNotEqual(after, before, "填充后 Ground 没有实时更新")
+            self.assertEqual(w.state.undo_stack.count(), count_before + 1,
+                             "填充 + 自动映射应合成一条撤销")
+            w.state.undo_stack.undo()
+            QApplication.processEvents()
+            restored = [ground.get(c0 + dx, r0 + dy)
+                        for dx in (-1, 0, 1, 5, 6, 7) for dy in (-1, 0, 1, 5, 6, 7)]
+            self.assertEqual(restored, before, "一次撤销没有还原 Ground")
+        finally:
+            set_layer.cells[:] = saved_set
+            ground.cells[:] = saved_ground
+            w.state.undo_stack.clear()
+            w._set_object_tool("brush")
+            w.state.stamp = None
+            w.act_automap_while.setChecked(False)
+            QApplication.processEvents()
+
     # ---- 第十八轮：set 层标记归一 + 落笔固定写 set 层 ----
     def _pen_draw_line(self, col, row, gid=130, stamp=None, n=8):
         w = self.w

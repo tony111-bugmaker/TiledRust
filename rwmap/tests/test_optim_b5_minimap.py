@@ -87,6 +87,17 @@ class MiniMapIncrementalTest(unittest.TestCase):
         self.mm.refresh_overview()
         self.assertEqual(_diff(partial, self.mm._overview.toImage()), 0)
 
+    def test_full_rebuild_caches_tile_pixmap_per_raw_gid(self):
+        """概览每格不足 1px：同一 gid 只应解析/缩放一次，而非逐格重复。"""
+        raw_a, raw_b = 11, 22
+        cells = [(c, r, raw_a if (c + r) % 3 else raw_b)
+                 for r in range(16) for c in range(16)]
+        self._change(cells)
+        with mock.patch("rwmap.widgets.minimap.get_pixmap",
+                        return_value=_tile_pixmap()) as gp:
+            self.mm.refresh_overview()
+        self.assertEqual(gp.call_count, 2)
+
     def test_local_redraw_covers_far_fewer_cells_than_full(self):
         with mock.patch.object(self.mm, "_draw_cells_region",
                                wraps=self.mm._draw_cells_region) as m:

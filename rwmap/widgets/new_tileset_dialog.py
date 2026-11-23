@@ -10,8 +10,8 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QVBoxLayout,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QVBoxLayout,
 )
 
 from ..document.tileset import Tileset
@@ -27,7 +27,10 @@ class NewTilesetDialog(QDialog):
         self.image_path: Path | None = None
         self.document: TilesetDocument | None = None
 
+        self.setMinimumWidth(320)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 10)
+        layout.setSpacing(8)
         form = QFormLayout()
 
         self.image_edit = QLineEdit()
@@ -68,16 +71,18 @@ class NewTilesetDialog(QDialog):
 
         layout.addLayout(form)
 
-        btns = QHBoxLayout()
-        btns.addStretch(1)
-        ok = QPushButton("创建")
+        # 底部按钮用 QDialogButtonBox 并给足最小点击区域。此前手写
+        # QPushButton 在 Windows11 样式下只有 26×17，紧贴窗口底边，
+        # 用户点文字边缘很容易落空，看起来像“创建 / 取消没反应”。
+        buttons = QDialogButtonBox(self)
+        ok = buttons.addButton("创建", QDialogButtonBox.AcceptRole)
         ok.setDefault(True)
-        ok.clicked.connect(self._on_accept)
-        cancel = QPushButton("取消")
-        cancel.clicked.connect(self.reject)
-        btns.addWidget(ok)
-        btns.addWidget(cancel)
-        layout.addLayout(btns)
+        cancel = buttons.addButton("取消", QDialogButtonBox.RejectRole)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        for btn in (ok, cancel):
+            btn.setMinimumSize(76, 28)
+        layout.addWidget(buttons)
 
     # ---------------- 交互 ----------------
     def _pick_image(self):
