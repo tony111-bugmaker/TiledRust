@@ -117,18 +117,18 @@ class LayerCacheTest(unittest.TestCase):
         item, _layer, _objs = _make(n=250)
         ref = _reference(item)
         got = _render(item)
-        # 单独跑本模块时逐像素相同；完整回归里别的用例可能改过应用字体 /
-        # 渲染提示，QImage 缓存与直接 drawText 的边缘会有少量差异（<1%）。
-        self.assertLess(_diff(got, ref), 0.01 * 400 * 320)
+        # 缓存帧：先烘焙内容、最后统一 cosmetic 描边框；参考帧逐对象交替绘制。
+        # 两者在填充边缘的抗锯齿叠加顺序不同（alpha 相同、肉眼不可见），
+        # 加上字体 / 渲染提示差异，按画面比例给 2% 容差。
+        self.assertLess(_diff(got, ref), 0.02 * 400 * 320)
 
     def test_cache_frame_with_selection_matches(self):
         item, _layer, objs = _make(n=250)
         item.set_selected([objs[3], objs[40]])
         ref = _reference(item)
         got = _render(item)
-        # 选中态是在缓存的未选中框上再描一遍，边缘会有极少量抗锯齿像素差异；
-        # 完整回归里其他用例可能改过应用字体，阈值按画面比例给（<1%）。
-        self.assertLess(_diff(got, ref), 0.01 * 400 * 320)
+        # 同上：边框统一在最后描，与逐对象路径有少量抗锯齿叠加差异。
+        self.assertLess(_diff(got, ref), 0.02 * 400 * 320)
 
     def test_local_edit_refreshes_cache(self):
         item, _layer, objs = _make(n=250)

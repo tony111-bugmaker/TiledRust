@@ -1,6 +1,7 @@
 """保真写回：只替换被编辑层的 <data> 文本 / <objectgroup> 内容，其余 DOM 不动。"""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from lxml import etree
@@ -8,7 +9,7 @@ from lxml import etree
 from ..document.layer import ObjectLayer
 from ..document.map_document import MapDocument, ensure_trigger_ids
 from ..document.map_object import format_points, parse_points
-from ..document.properties import PropertyBag
+from ..document.properties import HIDDEN_EDITOR_PROPERTIES, PropertyBag
 from ..rw import game_decor, unit_names
 from ..utils.paths import as_path
 from .layer_codec import encode
@@ -22,6 +23,15 @@ GAME_TYPE_ALIASES = {
     "unitAddRandom": "unitAdd",
     # 地图初始单位在 TMX 里没有 type，游戏靠 unit + team 识别；写回空串
     "mapUnit": "",
+    # 进攻点在 TMX 里同样没有 type，游戏靠 name=attack_point 识别
+    "attackPoint": "",
+    # 波次生成器 / 官方波次表是编辑器私有编排节点，编排数据走 rwmap_layout
+    # 根属性。写盘 type 必须是 point：游戏 TriggerEngine 遍历 Triggers 层时，
+    # 对没有 <properties> 的对象会报 "Skipping trigger: X - no properties
+    # found"，但对 type=point 的对象无条件跳过（实测 jar 字节码确认）。
+    # 之前写空 type 导致生存图一进游戏就刷这两行 desync 错误。
+    "waveGen": "point",
+    "waveTable": "point",
 }
 
 # 铁锈战争把这些属性按整数解析；若写出空字符串 ''，游戏会报
@@ -149,8 +159,18 @@ def _write_object(element, obj) -> None:
             element.attrib.pop("type", None)
             element.attrib.pop("class", None)
     else:
-        element.attrib.pop("type", None)
-        element.attrib.pop("class", None)
+        # 从磁盘重开后 waveGen/waveTable 的 type_ 会退化成空（编排数据只靠
+        # 私有标记从 rwmap_layout 还原）。这里必须按私有标记再认一次，
+        # 否则保存时又写出空 type，游戏继续报 "no properties found"。
+        _values = getattr(getattr(obj, "properties", None), "values", {}) or {}
+        _is_wave = (str(_values.get("rwmap_wave", "") or "").strip() == "1"
+                    or str(_values.get("rwmap_wave_table", "") or "").strip() == "1")
+        if _is_wave and obj.shape == "point":
+            element.set(type_key, "point")
+            element.attrib.pop(other_key, None)
+        else:
+            element.attrib.pop("type", None)
+            element.attrib.pop("class", None)
 
     element.set("x", _num(obj.x))
     element.set("y", _num(obj.y))
@@ -193,13 +213,21 @@ def _properties_for_write(bag: PropertyBag, obj=None) -> PropertyBag:
     copy.values = dict(bag.values)
     copy.types = dict(bag.types)
     copy.text_props = set(bag.text_props)
+    # 编辑器私有属性（节点图布局 / 分组）绝不能写进 TMX：铁锈战争的触发器
+    # 校验器会逐个检查 property 名，遇到不认识的 key 就报
+    # "Key was not used: xxx" 的 desync 错误并跳过该触发器。布局改存到
+    # 地图同目录的 .rwmap-layout.json（见 _write_layout_sidecar）。
+    for key in HIDDEN_EDITOR_PROPERTIES:
+        copy.values.pop(key, None)
+        copy.types.pop(key, None)
+        copy.text_props.discard(key)
     if "randomUnits" in bag.values:
-        pairs = unit_names.parse_weighted(bag.get("randomUnits", ""))
+        triples = unit_names.parse_units(bag.get("randomUnits", ""))
         copy.values.pop("randomUnits", None)
         copy.types.pop("randomUnits", None)
         copy.text_props.discard("randomUnits")
-        if pairs:
-            copy.values["spawnUnits"] = unit_names.build_spawn_units_weighted(pairs)
+        if triples:
+            copy.values["spawnUnits"] = unit_names.build_spawn_units_full(triples)
     if obj is not None and obj.shape == "text":
         for key, value in game_decor.text_props_for_write(obj).items():
             copy.values[key] = value
@@ -307,12 +335,66 @@ def _sync_object_layer(doc: MapDocument, layer: ObjectLayer) -> None:
     layer.dirty = False
 
 
+MAP_LAYOUT_PROPERTY = "rwmap_layout"
+
+
+def collect_editor_layout(doc: MapDocument) -> dict[str, dict[str, str]]:
+    """收集所有对象的编辑器私有属性（节点图位置 / 分组），按层名+对象 id 索引。"""
+    objects: dict[str, dict[str, str]] = {}
+    for layer in doc.layers:
+        if not isinstance(layer, ObjectLayer):
+            continue
+        for obj in layer.objects:
+            bag = getattr(obj, "properties", None)
+            if bag is None:
+                continue
+            private = {
+                key: str(bag.get(key))
+                for key in HIDDEN_EDITOR_PROPERTIES
+                if bag.get(key) not in (None, "")
+            }
+            if private:
+                objects[f"{layer.name}:{obj.object_id}"] = private
+    return objects
+
+
+def _write_layout_to_map_properties(doc: MapDocument) -> None:
+    """把节点布局写进地图根 <properties>，而不是触发器对象属性。
+
+    铁锈战争只校验**触发器对象**的 property 名：遇到不认识的 key 就报
+    ``Key was not used`` desync 并跳过触发器。但地图根属性它完全不校验——
+    真实生存图里普遍有 fill / tag / sw1..sw6 / author 等自定义键。因此布局
+    写进根属性 RW_MAP_LAYOUT_PROPERTY，既留在 TMX 里，又不会让游戏弹错。
+    """
+    root = doc.tree.getroot()
+    props = root.find("properties")
+    if props is None:
+        props = etree.Element("properties")
+        root.insert(0, props)
+    node = next((c for c in props
+                 if getattr(c, "tag", None) == "property"
+                 and c.get("name") == MAP_LAYOUT_PROPERTY), None)
+    objects = collect_editor_layout(doc)
+    if not objects:
+        if node is not None:
+            props.remove(node)
+        return
+    payload = json.dumps({"version": 1, "objects": objects},
+                         ensure_ascii=False, separators=(",", ":"))
+    if node is None:
+        node = etree.SubElement(props, "property")
+        node.set("name", MAP_LAYOUT_PROPERTY)
+    node.attrib.pop("type", None)
+    node.set("value", payload)
+
+
 def write_document(doc: MapDocument, path=None) -> Path:
     target = as_path(path) if path is not None else doc.path
     # 图片对象 -> 内嵌图集贴图：必须在 _sync_layer_order 之前（可能新建 Items 层）；
     # 写盘后 restore 把内存里的 Items cells 还原成用户编辑的干净数据。
     restore_decor, _decor_count = game_decor.sync_decor_to_game(doc, target)
     try:
+        _write_layout_to_map_properties(doc)
         return _write_document_unlocked(doc, target)
     finally:
         restore_decor()

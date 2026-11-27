@@ -15,10 +15,22 @@ import re
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QWheelEvent
 from rwmap.document.map_object import object_uid
-from rwmap.document.properties import HIDDEN_EDITOR_PROPERTIES
+from rwmap.document.properties import (
+    HIDDEN_EDITOR_PROPERTIES, MERGE_PRIMARY_PROPERTY,
+    WAVE_GEN_TYPE,
+    WAVE_MARK_PROPERTY,
+    WAVE_NAME_PROPERTY,
+    WAVE_NEXT_PROPERTY,
+    WAVE_TIME_PROPERTY,
+    WAVE_UNITS_PROPERTY,
+    WAVE_TABLE_MARK_PROPERTY,
+    WAVE_TABLE_NEXT_PROPERTY,
+    WAVE_TABLE_TEXT_PROPERTY,
+    WAVE_TABLE_TYPE,
+)
 from PySide6.QtWidgets import (
     QComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QScrollArea, QSizePolicy, QStyleOptionViewItem,
+    QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStyleOptionViewItem,
     QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
@@ -51,6 +63,12 @@ TYPE_COLORS = {
     # 三种「造兵」类型统一用生成单位的绿色（用户要求），不另造颜色。
     "unitAddRandom": "#2f8f52", "mapUnit": "#2f8f52",
     "changeCredits": "#9a8a30", "move": "#6a4fa0", "point": "#3a7a7a",
+    "attackPoint": "#b06a3a",
+    # 波次生成器：生存模式的波次编排，用醒目的青绿色和刷兵绿区分。
+    WAVE_GEN_TYPE: "#2f9f9a",
+    # 官方波次表节点：承载原版 survivalWaves 文本，用深一点的青蓝区别于
+    # 一波一节点的波次生成器。
+    WAVE_TABLE_TYPE: "#2f7a9a",
     "basic": "#555555", "camera_pan": "#4a6a8a", "rotate": "#6a4a6a",
     "moveCamera": "#3a6a6a", "objective": "#8a6a2a", "set_team": "#5a4a8a",
     "ai_allow_full_use": "#4a5a4a", "team_info": "#5a5a3a",
@@ -105,6 +123,84 @@ class NoWheelComboBox(QComboBox):
 
     def wheelEvent(self, event: QWheelEvent):  # noqa: N802
         event.ignore()
+
+
+class ValueCombo(NoWheelComboBox):
+    """属性值下拉：点选预设值，显示中文、写回英文。
+
+    封闭枚举（地图模式 / 迷雾 / 胜负条件 / 布尔开关）用非可编辑下拉：
+    点击控件任意位置直接弹列表，每一项显示中文（VALUE_HINTS），itemData
+    存写回 TMX 的英文值。颜色这类需要自定义值的属性用可编辑下拉，既能
+    点中文预设色，也能手输 #RRGGBB。
+
+    对外保持 QLineEdit 的几个接口（text/setText/placeholderText/
+    editingFinished），text() 返回的是「逻辑值」（英文 / 自定义值），
+    不是屏幕上看到的中文标签，属性行写回逻辑不用分叉。
+    """
+
+    editingFinished = Signal()
+    textEdited = Signal(str)
+
+    def __init__(self, choices=(), parent=None, editable=True):
+        super().__init__(parent)
+        self._editable = bool(editable)
+        self.setEditable(self._editable)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setMinimumWidth(0)
+        for c in choices:
+            value = str(c)
+            # 中文标签显示，英文值存 itemData（VALUE_HINTS 在模块加载后才有）
+            label = VALUE_HINTS.get(value, value)
+            self.addItem(label, value)
+        line = self.lineEdit()
+        if line is not None:
+            line.editingFinished.connect(self.editingFinished.emit)
+            line.textEdited.connect(self.textEdited.emit)
+        self.currentIndexChanged.connect(self._on_index_changed)
+
+    def _on_index_changed(self, _i):
+        self.editingFinished.emit()
+        self.textEdited.emit(str(self.itemData(_i) or ""))
+
+    def _shown_text(self) -> str:
+        if self._editable:
+            line = self.lineEdit()
+            if line is not None:
+                return line.text()
+        return self.currentText()
+
+    def _logical_value(self, shown: str) -> str:
+        """屏幕显示文字 -> 逻辑值（英文 data）；自定义值原样返回。"""
+        for i in range(self.count()):
+            if self.itemText(i) == shown:
+                return str(self.itemData(i))
+        return shown
+
+    def text(self) -> str:
+        return self._logical_value(self._shown_text())
+
+    def setText(self, value: str):
+        value = str(value)
+        idx = self.findData(value)
+        if idx >= 0:
+            self.setCurrentIndex(idx)
+        elif self._editable:
+            self.setEditText(value)   # 自定义值（如 #87CEFA）
+        else:
+            self.addItem(value, value)  # 未知值也别丢，临时补一项
+            self.setCurrentIndex(self.count() - 1)
+
+    def setCurrentText(self, text: str):
+        self.setText(text)
+
+    def placeholderText(self) -> str:
+        line = self.lineEdit()
+        return line.placeholderText() if line is not None else ""
+
+    def setPlaceholderText(self, text: str):
+        line = self.lineEdit()
+        if line is not None:
+            line.setPlaceholderText(text)
 
 
 class _TypeColorDelegate(QStyledItemDelegate):
@@ -190,6 +286,21 @@ TYPE_DEFS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "move": ("单位移动", "让某队单位移动到 point 锚点",
              ("target", "team", "delay")),
     "point": ("坐标锚点", "主要靠对象 name 与坐标，通常不需要属性", ()),
+    # 生存 / 无尽模式的进攻点：TMX 里 type 为空，游戏靠 name=attack_point 识别，
+    # 位置由对象坐标决定。内部用 attackPoint key，选这个类型时自动把名字改成
+    # attack_point，写回时映射成空 type。
+    "attackPoint": ("进攻点", "生存 / 无尽模式敌人进攻的目标点，靠对象坐标定位；"
+                    "TMX 中无 type，靠 name=attack_point 识别", ()),
+    # 波次生成器：只在生存模式可选。每个节点 = 一波，用「下一波」连线串成链，
+    # 保存时编译成原版 survivalWaves（保留官方倒计时）。编排数据走私有属性。
+    WAVE_GEN_TYPE: ("波次生成器", "生存模式：一个节点一波，用右侧端口连到下一波；"
+                    "保存时自动编译成原版生存波次表（含官方倒计时）",
+                    (WAVE_TIME_PROPERTY, WAVE_UNITS_PROPERTY)),
+    # 官方波次表节点：整段原版文本挂在一个隐藏触发器上，可连线、地图不显示；
+    # 保存时同步到 map_info.survivalWaves，保留官方 Wave 倒计时。
+    WAVE_TABLE_TYPE: ("官方波次表", "生存模式：一个节点承载整段原版波次表文本；"
+                      "节点图可连线、地图画布不显示；保存时自动写入 map_info",
+                      (WAVE_TABLE_TEXT_PROPERTY,)),
     "basic": ("通用事件", "全局播报 / 通用调度",
               ("globalMessage", "globalMessage_delayPerChar", "globalMessage_textColor")),
     "camera_pan": ("镜头平移", "开场镜头平移，顺序写在 index",
@@ -215,6 +326,9 @@ TYPE_DEFS: dict[str, tuple[str, str, tuple[str, ...]]] = {
 
 # 空 type 且带 unit 属性 => 地图初始单位；其余空 type（map_info / 矩形等）保持未分类
 INITIAL_UNIT_TYPE = "mapUnit"
+# 进攻点：空 type + name=attack_point（游戏靠名字识别，TMX 里不写 type）
+ATTACK_POINT_TYPE = "attackPoint"
+ATTACK_POINT_NAME = "attack_point"
 
 
 def effective_type(obj) -> str:
@@ -225,9 +339,18 @@ def effective_type(obj) -> str:
     属性」才归为 mapUnit，其余空 type 原样返回（界面显示为未分类）。
     """
     t = getattr(obj, "type_", "") or ""
-    if not t and "unit" in (getattr(obj, "properties", None)
-                            and obj.properties.values or {}):
+    values = (getattr(obj, "properties", None) and obj.properties.values) or {}
+    # 波次生成器：从磁盘重开时写盘映射成空 type，靠私有标记识别。
+    if str(values.get(WAVE_MARK_PROPERTY, "") or "").strip() == "1":
+        return WAVE_GEN_TYPE
+    # 官方波次表节点：同理，写盘映射成空 type，靠私有标记还原。
+    if str(values.get(WAVE_TABLE_MARK_PROPERTY, "") or "").strip() == "1":
+        return WAVE_TABLE_TYPE
+    if not t and "unit" in values:
         return INITIAL_UNIT_TYPE
+    # 进攻点：TMX 里 type 为空、name 固定 attack_point（游戏按名字识别）
+    if not t and (getattr(obj, "name", "") or "") == ATTACK_POINT_NAME:
+        return ATTACK_POINT_TYPE
     return t
 
 COMMON_PROPS = (
@@ -286,6 +409,15 @@ PROP_DEFS: dict[str, tuple[str, str, str]] = {
     "loseCondition": ("失败条件", "同胜利条件，生存图常用", "allUnitsAndBuildings"),
     "shareFogWithAllies": ("盟友共享视野", "true / false", "true"),
     "survivalWaves": ("生存波次", "生存模式的波次文本", "wave1, wave2"),
+    WAVE_TIME_PROPERTY: ("波次时间", "距离开局多久刷这一波：分:秒 或 秒数（如 0:10 / 70s）",
+                         "0:10"),
+    WAVE_NAME_PROPERTY: ("波次名称", "这一波的名字，会显示在官方倒计时旁", "第一波"),
+    WAVE_UNITS_PROPERTY: ("刷兵列表", "数量 单位名，逗号分隔；也接受 单位*数量 写法",
+                          "6 bugMelee,2 heavyTank"),
+    WAVE_TABLE_TEXT_PROPERTY: ("官方波次表", "原版波次文本，每行一波：+分:秒 波名 - 数量 单位名；"
+                               "保存时写入 map_info，游戏显示官方倒计时",
+                               "+0:10 第一波 - 6 bugMelee,2 heavyTank\n"
+                               "+0:30 第二波 - 4 mechFlame,8 bugMelee"),
     "allyGroup": ("结盟组", "同一组的队伍互为盟友", "0"),
     "ai": ("AI 类型", "如 survival", "survival"),
     "lockAiDifficulty": ("锁定 AI 难度", "数字，如 6", "6"),
@@ -294,6 +426,34 @@ PROP_DEFS: dict[str, tuple[str, str, str]] = {
     "dir": ("旋转角度", "单位：度", "90"),
     "spawnX": ("生成偏移 X", "相对坐标", "0"),
     "spawnY": ("生成偏移 Y", "相对坐标", "0"),
+}
+
+# 枚举属性：属性值输入框改成「点选 + 可编辑」下拉，省得手打英文。
+# 只收录取值封闭的属性；团队、单位名、时间、id 这类自由值仍用普通文本框。
+# 下拉项显示的就是写回 TMX 的英文值（中文释义继续由下方 vhint 显示），
+# 自定义值（如 #87CEFA）也能直接输入，不会被下拉改写。
+BOOL_CHOICES = ("true", "false")
+ENUM_PROP_CHOICES: dict[str, tuple[str, ...]] = {
+    "type": ("skirmish", "mission", "survival", "challenge", "endless"),
+    "fog": ("map", "los", "NONE"),
+    "winCondition": ("none", "commandCenter", "mainBuildings",
+                     "allBuildings", "allUnitsAndBuildings"),
+    "loseCondition": ("none", "commandCenter", "mainBuildings",
+                      "allBuildings", "allUnitsAndBuildings"),
+    "includeIncomplete": BOOL_CHOICES,
+    "onlyMainBuildings": BOOL_CHOICES,
+    "onlyOnResourcePool": BOOL_CHOICES,
+    "onlyBuilders": BOOL_CHOICES,
+    "onlyBuildings": BOOL_CHOICES,
+    "onlyAttack": BOOL_CHOICES,
+    "allToActivate": BOOL_CHOICES,
+    "showOnMap": BOOL_CHOICES,
+    "shareFogWithAllies": BOOL_CHOICES,
+    "disabledAI": BOOL_CHOICES,
+    "textColor": ("red", "green", "blue", "yellow", "white", "purple", "black"),
+    "globalMessage_textColor": ("red", "green", "blue", "yellow",
+                                "white", "purple", "black"),
+    "ai": ("survival", "skirmish", "mission", "challenge", "endless"),
 }
 
 # 常见属性值的中文释义（只显示，绝不改写实际值）
@@ -340,6 +500,15 @@ def prop_example(key: str) -> str:
     return PROP_DEFS.get(key, (key, "", ""))[2]
 
 
+def enum_hint(key: str) -> str:
+    """枚举属性的中文可选提示：「遭遇战、战役任务、生存模式…」。"""
+    choices = ENUM_PROP_CHOICES.get(key)
+    if not choices:
+        return ""
+    labels = [VALUE_HINTS.get(str(c), str(c)) for c in choices]
+    return "可选：" + "、".join(labels)
+
+
 def summary_keys(type_name: str) -> tuple[str, ...]:
     """节点摘要按当前类型模板排序。"""
     keys = list(type_props(type_name))
@@ -366,7 +535,14 @@ def describe_value(key: str, value) -> str:
     if re.fullmatch(r"\d+(\.\d+)?s", text):
         return text[:-1] + " 秒"
     # 单位类属性：把内部名翻译成中文（heavyTank -> 重型坦克）
-    if key in ("unitType", "spawnUnits"):
+    if key == WAVE_UNITS_PROPERTY:
+        # 刷兵列表是「数量 单位名」原版格式；直接按单位名切分会读到数字。
+        hints = []
+        for raw, count in unit_names.parse_wave_units(text):
+            cn = unit_names.to_cn(raw)
+            hints.append(f"{cn}×{count}" if count > 1 else cn)
+        return "、".join(hints)
+    if key in ("unitType", "spawnUnits", "unit"):
         hints = []
         for part in _split_list(text):
             p = part.strip()
@@ -436,6 +612,7 @@ class TriggerInspector(QWidget):
         self.edges: list[tuple] = []  # (方向, 标签, 对端名, 颜色[, GraphEdge])
         self.undo_stack = None
         self.on_change = None
+        self.merge_targets: list[tuple] = []   # 整合体成员，编辑时同步写入
         self._loading = False
 
         self.setStyleSheet(f"""
@@ -475,6 +652,24 @@ class TriggerInspector(QWidget):
         self.undo_stack = undo_stack
         self.on_change = on_change
 
+    def set_merge_targets(self, objs):
+        """整合体的成员对象：右侧面板每次编辑都要同步写进这些对象。
+
+        存 ``(layer, uid, object_id)`` 而不是对象引用——撤销命令会用快照
+        克隆替换 layer.objects，旧引用马上失效。uid 优先、id 兜底。
+        """
+        self.merge_targets = []
+        if not objs or self.doc is None:
+            return
+        for obj in objs:
+            for layer in self.doc.layers:
+                if not hasattr(layer, "objects"):
+                    continue
+                if any(existing is obj for existing in layer.objects):
+                    self.merge_targets.append(
+                        (layer, object_uid(obj), getattr(obj, "object_id", None)))
+                    break
+
     def current_object_id(self):
         return getattr(self.obj, "object_id", None)
 
@@ -487,6 +682,7 @@ class TriggerInspector(QWidget):
         self.obj = None
         self.node = None
         self.edges = []
+        self.merge_targets = []
         self._show_empty()
 
     def reset(self):
@@ -569,7 +765,17 @@ class TriggerInspector(QWidget):
                 row, QColor(color_for(color_key if color_key is not None else key)),
                 Qt.ForegroundRole)
 
+        # 「波次生成器」只在生存模式可选：切到别的模式就消失。已存在的节点
+        # 若当前不是生存模式，仍要能显示其类型（下面 findData < 0 的兜底会加）。
+        survival = False
+        try:
+            from ..rw.wave_gen import is_survival_map
+            survival = is_survival_map(self.doc)
+        except Exception:
+            survival = False
         for key, (label, _hint, _tpl) in TYPE_DEFS.items():
+            if key in (WAVE_GEN_TYPE, WAVE_TABLE_TYPE) and not survival:
+                continue
             _add_typed_item(f"{label}（{key}）", key)
         # 纯空 type（map_info / 矩形等辅助对象）显示为「未分类」，不要误当初始单位
         if not any(self.f_type.itemData(i) == "" for i in range(self.f_type.count())):
@@ -607,9 +813,17 @@ class TriggerInspector(QWidget):
         seen = set()
         self._prop_rows: list[tuple[str, QLineEdit, QLabel]] = []
         count = 0
+        # 波次生成器的私有属性里只露时间 / 刷兵：名字直接用顶上的「名字」
+        # 字段（obj.name），不再单独设一个「波次名称」，避免两处名字打架。
+        # 标记 / 下一波 / 旧波次名属性仍隐藏（旧波次名留作重开兜底）。
+        wave_data_props = {WAVE_TIME_PROPERTY, WAVE_UNITS_PROPERTY}
+        table_visible_props = {WAVE_TABLE_TEXT_PROPERTY}
         for key in ordered:
+            hidden_ok = key not in HIDDEN_EDITOR_PROPERTIES or (
+                (cur == WAVE_GEN_TYPE and key in wave_data_props)
+                or (cur == WAVE_TABLE_TYPE and key in table_visible_props))
             if (key in seen or key == "id" or key in LINK_PROPS
-                    or key in HIDDEN_EDITOR_PROPERTIES or key not in props):
+                    or not hidden_ok or key not in props):
                 continue
             seen.add(key)
             # 已有「随机生成单位」时，spawnUnits 完全由它派生，不再单独显示。
@@ -617,6 +831,14 @@ class TriggerInspector(QWidget):
                 continue
             if key == "randomUnits":
                 self._add_random_units_row(key, props.get(key, ""))
+            elif key == "spawnUnits":
+                self._add_units_row(key, props.get(key, ""), "spawn")
+            elif key == "unit":
+                self._add_units_row(key, props.get(key, ""), "initial")
+            elif key == WAVE_UNITS_PROPERTY:
+                self._add_units_row(key, props.get(key, ""), "wave")
+            elif key == WAVE_TABLE_TEXT_PROPERTY:
+                self._add_multiline_prop_row(key, props.get(key, ""))
             else:
                 self._add_prop_row(key, props.get(key, ""))
             count += 1
@@ -666,17 +888,21 @@ class TriggerInspector(QWidget):
         lab.setFixedWidth(82)
         lab.setToolTip(key + (" · " + prop_desc(key) if prop_desc(key) else ""))
         h.addWidget(lab)
-        edit = QLineEdit(str(value))
-        edit.setMinimumWidth(0)
-        edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        if key in ENUM_PROP_CHOICES:
+            # 颜色允许手输自定义 #RRGGBB；其余封闭枚举纯点选（点击直接弹列表）
+            editable = key in ("textColor", "globalMessage_textColor")
+            edit = ValueCombo(ENUM_PROP_CHOICES[key], editable=editable)
+            edit.setText(str(value))
+            desc = enum_hint(key) or prop_desc(key)
+        else:
+            edit = QLineEdit(str(value))
+            edit.setMinimumWidth(0)
+            edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            desc = prop_desc(key)
         edit.setPlaceholderText(prop_example(key) or key)
-        edit.setToolTip(prop_desc(key) or key)
+        edit.setToolTip(desc or key)
         edit.editingFinished.connect(
-            lambda k=key, e=edit: self._edit(
-                lambda o, kk=k, vv=unit_names.normalize_spawn_units(e.text())
-                if k in ("unitType", "spawnUnits") else e.text():
-                o.properties.set(kk, vv),
-                f"修改属性 {k}"))
+            lambda k=key, e=edit: self._commit_prop_value(k, e.text()))
         h.addWidget(edit)
         btn = CrossButton()
         btn.setFixedWidth(26)
@@ -704,17 +930,82 @@ class TriggerInspector(QWidget):
                 l.setVisible(bool(describe_value(k, text)))))
         self._prop_rows.append((key, edit, vhint))
 
+    def _add_multiline_prop_row(self, key: str, value: str):
+        """多行文本属性（官方波次表）：QPlainTextEdit + 失焦提交。
+
+        波次表是原版整段文本、每行一波，单行框没法粘贴编辑，故用多行框。
+        提交时机用「失去焦点」，避免每敲一个字就进撤销栈。
+        """
+        row = QWidget()
+        v = QVBoxLayout(row)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(3)
+        lab = self._label(prop_label(key), THEME["muted"], 11)
+        lab.setToolTip(key + (" · " + prop_desc(key) if prop_desc(key) else ""))
+        v.addWidget(lab)
+        edit = QPlainTextEdit()
+        edit.setPlainText(str(value))
+        edit.setPlaceholderText(prop_example(key) or key)
+        edit.setToolTip(prop_desc(key) or key)
+        edit.setMaximumHeight(150)
+        edit.setMinimumHeight(72)
+        # 失焦提交：QPlainTextEdit 没有 editingFinished，用 eventFilter 捕获
+        # FocusOut（见本类 eventFilter）。用内部映射把控件和 key 关联。
+        edit.installEventFilter(self)
+        if not hasattr(self, "_multiline_edits"):
+            self._multiline_edits = {}
+        self._multiline_edits[id(edit)] = (edit, key, lambda: edit.toPlainText())
+        v.addWidget(edit)
+        btn = CrossButton()
+        btn.setFixedWidth(26)
+        btn.setToolTip("删除该属性")
+        btn.setStyleSheet(
+            "QPushButton{background:#3a2020;border:1px solid #111;color:#e88;"
+            "border-radius:4px;font-size:11px;}")
+        btn.clicked.connect(lambda _c=False, k=key: self._remove_prop(k))
+        h = QHBoxLayout()
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addStretch(1)
+        h.addWidget(btn)
+        v.addLayout(h)
+        self.vbox.addWidget(row)
+        # 登记进 _prop_rows（与 _add_prop_row 一致），供测试与摘要读取；
+        # QPlainTextEdit 用 toPlainText()，这里只取 key 的地方不受影响。
+        self._prop_rows.append((key, edit, None))  # type: ignore[arg-type]
+
+    def eventFilter(self, obj, event):
+        """QPlainTextEdit 失焦时提交多行属性（见 _add_multiline_prop_row）。"""
+        try:
+            from PySide6.QtCore import QEvent
+            edits = getattr(self, "_multiline_edits", {})
+            entry = edits.get(id(obj))
+            if entry is not None and event.type() == QEvent.Type.FocusOut:
+                _edit, key, getter = entry
+                self._edit(
+                    lambda o, kk=key, vv=getter(): o.properties.set(kk, vv),
+                    f"修改属性 {key}")
+        except Exception:  # noqa: BLE001 - 事件过滤不该让面板崩掉
+            pass
+        return super().eventFilter(obj, event)
+
     def _cn_weighted(self, value: str) -> str:
-        """randomUnits -> 中文展示串（重型坦克 ×3、坦克 ×2、侦察车）。"""
-        pairs = unit_names.parse_weighted(value)
+        """randomUnits -> 中文展示串（重型坦克 ×3#2、坦克 ×2、侦察车）。
+
+        ``×权重`` 后面若数量 >1，再跟 ``#数量``，与对话框里的三列对应。
+        """
+        triples = unit_names.parse_units(value)
         parts = []
-        for raw, weight in pairs:
+        for raw, weight, count in triples:
             cn = unit_names.to_cn(raw)
-            parts.append(cn if weight == 1 else f"{cn} ×{('%g' % weight)}")
+            seg = cn if weight == 1 else f"{cn} ×{('%g' % weight)}"
+            if count > 1:
+                seg += f"#{count}"
+            parts.append(seg)
         return "、".join(parts)
 
     def _weight_hint(self, value: str) -> str:
-        pairs = unit_names.parse_weighted(value)
+        triples = unit_names.parse_units(value)
+        pairs = [(u, w) for u, w, _n in triples]
         live = [(u, w) for u, w in pairs if (w or 0) > 0]
         if not live:
             return ""
@@ -725,8 +1016,8 @@ class TriggerInspector(QWidget):
     def _add_random_units_row(self, key: str, value: str):
         """「随机生成单位」专用行：中文展示 + 权重 + 多选对话框。
 
-        写法 ``重型坦克:3,坦克:2,侦察车:1``（省略权重 = 1）；导出 TMX 时由
-        tmx_writer 按权重折算成链式 spawnChance，导入时若能安全反推则还原。
+        写法 ``重型坦克:3#2,坦克:2#1``（冒号后权重、井号后数量，都省略 = 1）；
+        导出 TMX 时由 tmx_writer 折算成 ``单位*数量(spawnChance=...)``，导入时反推。
         """
         from .unit_picker import UnitPickerDialog
         row = QWidget()
@@ -741,7 +1032,7 @@ class TriggerInspector(QWidget):
         edit = QLineEdit(self._cn_weighted(value))
         edit.setMinimumWidth(0)
         edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        edit.setPlaceholderText("重型坦克:3, 坦克:2（冒号后是权重，可省略）")
+        edit.setPlaceholderText("重型坦克:3#2, 坦克:2（冒号后权重、井号后数量）")
         edit.setToolTip(prop_desc(key) or key)
         h.addWidget(edit)
 
@@ -780,16 +1071,20 @@ class TriggerInspector(QWidget):
 
         def _open_picker():
             dlg = UnitPickerDialog(
-                self, current=[(u, w) for u, w in
-                               unit_names.parse_weighted(edit.text())])
+                self, current=unit_names.parse_units(edit.text()))
             if dlg.exec() == 1:  # QDialog.Accepted
-                edit.setText(self._cn_weighted(
-                    unit_names.format_weighted(dlg.selected_weighted)))
+                text = unit_names.format_units(dlg.selected_units)
+                edit.setText(self._cn_weighted(text))
                 _refresh_hint()
+                # QLineEdit.setText() 不触发 editingFinished：必须在这里显式
+                # 写回文档，否则取消选中再选回来（面板从文档重建）改动会「回退」。
+                # 先刷新提示再提交：_edit 会走撤销回调重建面板，edit 会失效。
+                self._edit(lambda o, v=text: o.properties.set(key, v),
+                           "编辑随机生成单位")
 
         def _commit():
-            pairs = unit_names.parse_weighted(edit.text())
-            text = unit_names.format_weighted(pairs)
+            triples = unit_names.parse_units(edit.text())
+            text = unit_names.format_units(triples)
             edit.setText(self._cn_weighted(text))
             _refresh_hint()
             self._edit(lambda o, v=text: o.properties.set(key, v),
@@ -797,6 +1092,116 @@ class TriggerInspector(QWidget):
 
         btn.clicked.connect(_open_picker)
         edit.editingFinished.connect(_commit)
+        self._prop_rows.append((key, edit, vhint))  # type: ignore[arg-type]
+
+    def _add_units_row(self, key: str, value: str, mode: str):
+        """「生成单位 / 地图初始单位」的属性行：文本 + 单位选择器按钮。
+
+        mode="spawn"    -> spawnUnits：选多个单位，各自可设数量，写回 ``单位*数量``。
+        mode="initial"  -> unit：单选一个单位，写回单个 raw 名。
+        mode="wave"     -> rwmap_wave_units：刷兵列表，写回原版 ``数量 单位名``。
+
+        选择器内部始终带「单位图鉴」入口；三种模式都不显示权重列。
+        括号里的额外参数（falling=true 等）按 raw 名保留，重排不丢。
+        """
+        from .unit_picker import UnitPickerDialog
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(5)
+        lab = self._label(prop_label(key), THEME["muted"], 11)
+        lab.setFixedWidth(82)
+        lab.setToolTip(key + (" · " + prop_desc(key) if prop_desc(key) else ""))
+        h.addWidget(lab)
+
+        edit = QLineEdit(str(value))
+        edit.setMinimumWidth(0)
+        edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        edit.setPlaceholderText(prop_example(key) or key)
+        edit.setToolTip(prop_desc(key) or key)
+        h.addWidget(edit)
+
+        btn = QPushButton("选择…")
+        btn.setFixedWidth(62)
+        btn.setStyleSheet(
+            f"QPushButton{{background:{ASH};color:{TEXT};border:1px solid {INK};"
+            "border-radius:4px;padding:4px;font-size:11px;}")
+        h.addWidget(btn)
+
+        cross = CrossButton()
+        cross.setFixedWidth(26)
+        cross.setToolTip("删除该属性")
+        cross.setStyleSheet(
+            "QPushButton{background:#3a2020;border:1px solid #111;color:#e88;"
+            "border-radius:4px;font-size:11px;}")
+        cross.clicked.connect(lambda _c=False, k=key: self._remove_prop(k))
+        h.addWidget(cross)
+        self.vbox.addWidget(row)
+
+        vhint = self._label(describe_value(key, value), THEME["vhint"], 10)
+        vhint.setContentsMargins(87, 0, 0, 3)
+        vhint.setWordWrap(True)
+        vhint.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.vbox.addWidget(vhint)
+        vhint.setVisible(bool(vhint.text()))
+
+        def _current() -> list[tuple[str, float, int]]:
+            if mode == "spawn":
+                return [(raw, 1.0, count)
+                        for raw, count, _p in unit_names.parse_fixed_units(edit.text())]
+            if mode == "wave":
+                return [(raw, 1.0, count)
+                        for raw, count in unit_names.parse_wave_units(edit.text())]
+            raw = unit_names.to_raw(edit.text().strip())
+            return [(raw, 1.0, 1)] if raw else []
+
+        def _refresh_hint():
+            text = describe_value(key, edit.text())
+            vhint.setText(text)
+            vhint.setVisible(bool(text))
+
+        edit.textEdited.connect(lambda _t: _refresh_hint())
+
+        def _open_picker():
+            dlg = UnitPickerDialog(self, current=_current(), mode=mode)
+            if dlg.exec() == 1:
+                picked = dlg.selected_units
+                if mode == "spawn":
+                    # 括号参数按 raw 名从原文本里捞回来，重排/改数量都不丢
+                    params = {raw: p for raw, _n, p
+                              in unit_names.parse_fixed_units(edit.text())}
+                    text = unit_names.format_fixed_units(
+                        [(raw, count, params.get(raw, ""))
+                         for raw, _w, count in picked])
+                elif mode == "wave":
+                    text = unit_names.format_wave_units(
+                        [(raw, count) for raw, _w, count in picked])
+                else:
+                    text = picked[0][0] if picked else ""
+                edit.setText(text)
+                _refresh_hint()
+                # 同 _add_random_units_row：程序化 setText 不发 editingFinished，
+                # 不主动提交的话切换选中后旧值会「复活」。
+                self._edit(lambda o, v=text: o.properties.set(key, v),
+                           f"编辑属性 {key}")
+
+        btn.clicked.connect(_open_picker)
+
+        def _commit():
+            if mode == "spawn":
+                text = unit_names.normalize_spawn_units(edit.text())
+            elif mode == "wave":
+                text = unit_names.format_wave_units(
+                    unit_names.parse_wave_units(edit.text()))
+            else:
+                text = unit_names.to_raw(edit.text().strip())
+            edit.setText(text)
+            _refresh_hint()
+            self._edit(lambda o, v=text: o.properties.set(key, v),
+                       f"编辑属性 {key}")
+
+        edit.editingFinished.connect(_commit)
+        self._prop_rows.append((key, edit, vhint))  # type: ignore[arg-type]
 
     def _fill_prop_picker(self, props: dict, cur: str):
         used = set(props)
@@ -867,35 +1272,60 @@ class TriggerInspector(QWidget):
 
     # ---------------- 编辑 / 撤销 ----------------
     def _commit(self, mutate, text: str):
+        """把一次属性编辑写进文档；整合体会同步写到每一个成员对象。
+
+        重复 object_id 的地图里按 id 找会静默改到第一个同 id 对象，必须按
+        稳定身份（object_uid）精确命中，找不到才退回 id 兜底。跨层成员也
+        支持，整批仍是一条撤销命令。
+        """
         if self.doc is None or self.layer is None or self.obj is None:
             return
-        from ..commands.object_command import ObjectCommand, snapshot
+        from ..commands.object_command import capture, push_object_edit
 
-        uid = object_uid(self.obj)
-        oid = self.obj.object_id
-        before = snapshot(self.layer)
+        primary = self.obj
+        specs = [(self.layer, object_uid(primary), primary.object_id)]
+        for spec in self.merge_targets:
+            if spec not in specs:
+                specs.append(spec)
+        before = capture([spec[0] for spec in specs])
 
-        def apply(current_layer):
-            # 重复 object_id 的地图里按 id 找会静默改到第一个同 id 对象，
-            # 必须按稳定身份精确命中；找不到才退回旧行为（无 xml_element 的测试对象）。
-            target = next((o for o in current_layer.objects
-                           if object_uid(o) == uid), None)
+        # 整合体同步前记下每个成员的自定义 id。id 是游戏 alsoActivate /
+        # activatedBy 引用的唯一标识，绝不能跟着代表节点一起被覆盖——否则
+        # 25 个出兵点全变成同一个 id，触发链只对第一个生效。
+        # 名字不同步保留：用户明确要求过「整合体改一处同步名字到所有成员」；
+        # 出兵点若因此被改名，保存时 ensure_attack_points() 会统一纠正并提示。
+        old_ids = {}
+        for layer, uid, oid in specs:
+            target = next((o for o in layer.objects if object_uid(o) == uid), None)
             if target is None:
-                target = next((o for o in current_layer.objects
-                               if o.object_id == oid), None)
-            if target is not None:
-                mutate(target)
+                target = next((o for o in layer.objects if o.object_id == oid), None)
+            if target is not None and target.properties is not None:
+                old_ids[uid] = str(target.properties.get("id") or "")
 
-        apply(self.layer)
-        after = snapshot(self.layer)
-        self.layer.dirty = True
+        for index, (layer, uid, oid) in enumerate(specs):
+            target = next((o for o in layer.objects if object_uid(o) == uid), None)
+            if target is None:
+                target = next((o for o in layer.objects if o.object_id == oid), None)
+            if target is None:
+                continue
+            mutate(target)
+            # 类型切换等 mutate 会用代表节点的属性整包覆盖；非代表成员不能
+            # 因此变成第二个「代表」，否则整合体会塌成多个入口。
+            if index > 0:
+                bag = target.properties
+                bag.values.pop(MERGE_PRIMARY_PROPERTY, None)
+                bag.types.pop(MERGE_PRIMARY_PROPERTY, None)
+                bag.text_props.discard(MERGE_PRIMARY_PROPERTY)
+                # 恢复该成员原本的 id（被 mutate 整包覆盖时尤其关键）
+                old_id = old_ids.get(uid, "")
+                if old_id and bag is not None:
+                    bag.set("id", old_id, "string")
+            layer.dirty = True
         self.doc.dirty = True
-        cmd = ObjectCommand(self.doc, self.layer, before, after, text,
-                            self._after_change)
-        if self.undo_stack is not None:
-            self.undo_stack.push(cmd)
-        else:
-            cmd.redo()
+        pushed = push_object_edit(self.doc, self.undo_stack, before, text,
+                                  self._after_change)
+        if not pushed:
+            self._after_change()
 
     def _after_change(self):
         """redo / undo 后由 Dock 重新刷新并重新绑定对象。"""
@@ -907,6 +1337,54 @@ class TriggerInspector(QWidget):
             return
         # 值没变就不生成撤销命令
         self._commit(mutate, text)
+
+    def _commit_prop_value(self, key: str, text: str):
+        """属性框提交：map_info 的模式切换要走专门的联动逻辑。"""
+        if self._loading or self.obj is None:
+            return
+        if key == "type" and self._is_map_info_object():
+            self._commit_map_mode(text)
+            return
+        value = (unit_names.normalize_spawn_units(text)
+                 if key in ("unitType", "spawnUnits") else text)
+        self._edit(lambda o, kk=key, vv=value: o.properties.set(kk, vv),
+                   f"修改属性 {key}")
+
+    def _is_map_info_object(self) -> bool:
+        return str(getattr(self.obj, "name", "") or "").strip().lower() == "map_info"
+
+    def _commit_map_mode(self, text: str):
+        """切到生存自动补空的第一波，切走则摘掉全部波次编排节点。
+
+        整批包在多层快照里，Ctrl+Z 一步同时恢复地图模式和节点。
+        """
+        from ..commands.object_command import capture, push_object_edit
+        from ..rw import wave_gen as wg
+
+        old = str(self.obj.properties.get("type") or "").strip().lower()
+        new_raw = str(text or "").strip()
+        new = new_raw.lower()
+        if old == new:
+            return
+        info = wg.find_map_info(self.doc)
+        if info is None:
+            return
+        was_survival = old == "survival"
+        now_survival = new == "survival"
+        layers = [l for l in self.doc.layers if hasattr(l, "objects")]
+        before = capture(layers)
+        info.properties.set("type", new_raw, "string")
+        if now_survival and not was_survival:
+            wg.ensure_first_wave(self.doc)
+        elif was_survival and not now_survival:
+            wg.remove_wave_nodes(self.doc)
+        for layer in layers:
+            layer.dirty = True
+        self.doc.dirty = True
+        pushed = push_object_edit(self.doc, self.undo_stack, before,
+                                  "切换地图模式", self._after_change)
+        if not pushed:
+            self._after_change()
 
     def _remove_prop(self, key: str):
         def mutate(o):
@@ -962,9 +1440,50 @@ class TriggerInspector(QWidget):
                 bag.set(k, value, typ)
                 if is_text:
                     bag.text_props.add(k)
+            # 互斥的类型标记不能残留：从波次生成器 / 官方波次表切走时清掉
+            # 各自的标记，否则重开后 effective_type 会误判成旧类型。
+            if new_type != WAVE_GEN_TYPE:
+                bag.values.pop(WAVE_MARK_PROPERTY, None)
+            if new_type != WAVE_TABLE_TYPE:
+                bag.values.pop(WAVE_TABLE_MARK_PROPERTY, None)
+                bag.values.pop(WAVE_TABLE_TEXT_PROPERTY, None)
+                bag.values.pop(WAVE_TABLE_NEXT_PROPERTY, None)
             o.type_ = new_type
-            if not o.name or o.name in (old_type, type_label(old_type)):
-                o.name = type_label(new_type)
+            if new_type == ATTACK_POINT_TYPE:
+                # 进攻点是游戏按固定名字识别的对象，选这个类型必须把名字
+                # 改成 attack_point，否则游戏不认（type 写回时也是空的）。
+                o.name = ATTACK_POINT_NAME
+            elif new_type == WAVE_GEN_TYPE:
+                # 波次节点：打私有标记（重开靠它识别类型），给个可辨识的名字。
+                bag.set(WAVE_MARK_PROPERTY, "1", "string")
+                if not o.name or o.name in (old_type, type_label(old_type)):
+                    o.name = "波次 1"
+            elif new_type == WAVE_TABLE_TYPE:
+                # 官方波次表节点：打标记；设 visible=false（地图画布不显示，
+                # 节点图仍显示可连线）；默认从 map_info 现有波次表带出文本。
+                bag.set(WAVE_TABLE_MARK_PROPERTY, "1", "string")
+                o.visible = False
+                if not o.name or o.name in (old_type, type_label(old_type)):
+                    o.name = "官方波次表"
+                if not bag.get(WAVE_TABLE_TEXT_PROPERTY):
+                    initial = ""
+                    try:
+                        from ..rw.wave_gen import find_map_info
+                        info = find_map_info(self.doc)
+                        if info is not None:
+                            initial = str(
+                                (info.properties.values or {}).get("survivalWaves", "")
+                                or "")
+                    except Exception:  # noqa: BLE001
+                        initial = ""
+                    bag.set(WAVE_TABLE_TEXT_PROPERTY, initial, "string")
+            else:
+                if not o.name or o.name in (old_type, type_label(old_type)):
+                    o.name = type_label(new_type)
+                # 从隐藏的波次表节点切回普通类型时恢复可见，避免节点在地图
+                # 画布上莫名消失。
+                if str(bag.get(WAVE_TABLE_MARK_PROPERTY, "") or "").strip() == "1":
+                    o.visible = True
 
         self._commit(mutate, f"切换触发器类型为 {type_label(new_type)}")
 

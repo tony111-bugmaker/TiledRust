@@ -21,6 +21,7 @@ game_assets/
 *.rwmod
 *.tmx.bak
 config/app_config.local.json
+config/local_service_token.txt
 
 # IDE
 .idea/

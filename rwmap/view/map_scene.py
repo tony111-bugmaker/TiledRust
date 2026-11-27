@@ -585,6 +585,7 @@ class MapScene(QGraphicsScene):
         self._obj_sel_box = None       # 对象选中包围框（含全部选中对象的整体外接矩形）
         self._stamp_preview = None
         self._pen_preview = None
+        self._ruler = None            # 标尺覆盖层（切工具不消失，右键才清）
         # ---- 纯视图显示开关（不写文档，不进撤销栈，不进 TMX） ----
         # current_layer 是「编辑语义」的当前层（只能是 TileLayer，map_view 靠它
         # 取 raw_gid），由 main_window 动态赋值；不要把它改成 property，否则对象
@@ -623,6 +624,7 @@ class MapScene(QGraphicsScene):
         self.doc = doc
         self._stamp_preview = None
         self._pen_preview = None      # clear() 会销毁 item，引用必须一并清空
+        self._ruler = None            # 标尺覆盖层同样随 scene.clear() 销毁
         # clear() 会销毁场景里所有 item（包括下面的选框），Python 引用必须一并清空，
         # 否则下次 set_selection_rect/set_object_selection_box 会访问已删除的 C++ 对象。
         self._selection_item = None
@@ -918,3 +920,14 @@ class MapScene(QGraphicsScene):
         # 只清空内容并标脏旧区域；不 removeItem（会触发整图脏区）。
         if self._pen_preview is not None:
             self._pen_preview.clear()
+
+    # ---------------- 标尺覆盖层（切工具不消失，右键才清） ----------------
+    def ruler_overlay(self):
+        """懒创建标尺 item；只创建一次，之后只改内容。"""
+        if self.doc is None:
+            return None
+        if self._ruler is None:
+            from .ruler_overlay import RulerOverlay
+            self._ruler = RulerOverlay(self.doc)
+            self.addItem(self._ruler)
+        return self._ruler

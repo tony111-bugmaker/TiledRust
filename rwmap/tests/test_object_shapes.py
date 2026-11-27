@@ -204,7 +204,7 @@ class ObjectToolsUiTest(unittest.TestCase):
     def test_toolbar_exposes_all_insert_tools(self):
         bar = self.w.object_toolbar
         names = [a.text() for a in bar.group.actions()]
-        self.assertEqual(len(names), 15)      # 第三十四轮把「框选」并入「选择 / 框选」
+        self.assertEqual(len(names), 16)      # 第三十四轮合并框选，后又加入「标尺」
         self.assertEqual(names[:4], ["瓦片画笔", "钢笔", "橡皮", "填充"])
         for expected in ("插入矩形", "插入椭圆", "插入点", "插入多边形",
                          "插入折线", "插入图块", "插入模板", "插入文字",

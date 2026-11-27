@@ -3,7 +3,8 @@
 只要三类输入，符合铁锈地图的实际用法：
 
 - 宽度（块）/ 高度（块）；
-- 要包含哪些图集（从版本配置里的 tilesets_root 列出 .tsx，可勾选）。
+- 要包含哪些图集（从版本配置里的 tilesets_root 列出 .tsx，可勾选）；
+- 勾选时可预览图集缩略图（开关控制显隐）。
 
 不再让用户输入「瓦片宽 / 瓦片高」——铁锈原生固定 20×20；若勾选的图集
 里写明了 tilewidth/tileheight，则自动采用第一个图集的尺寸。
@@ -13,18 +14,22 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton,
-    QVBoxLayout,
+    QVBoxLayout, QWidget,
 )
 
 from ..commands.document_command import AddExternalTilesetCommand
 from ..widgets.plain_spinbox import PlainSpinBox
+from ..io.path_resolver import ResourceResolver
 from ..io.tsx_reader import read_tsx
 from ..io.tmx_writer import create_blank_document
-from ..theme import TEXT_DIM
+from ..theme import ASH, TEXT_DIM
+from ..tilesets.image_loader import load_tileset_image
+from ..tilesets.tile_cache import pil_to_qpixmap
 
 # 铁锈原生瓦片尺寸（图集没写 tilewidth 时的兜底）
 RW_TILE_SIZE = 20
@@ -49,6 +54,33 @@ def _default_selected(label: str) -> bool:
     """默认勾选基础地形图集（含 units.tsx），其余（ ridges 等）留给用户选。"""
     low = label.replace("\\", "/").lower()
     return low.startswith("terrain/") or low == "units.tsx"
+
+
+_PREVIEW_MAX = QSize(280, 176)
+
+
+def _tileset_preview(tsx_path: str, resolver, max_size: QSize = _PREVIEW_MAX):
+    """返回 (缩略图, 说明文字)；读取失败返回 (None, 错误文字)。
+
+    复用图集 loader：trans 色键会转成 alpha，透明处露出预览框底色。
+    """
+    path = Path(tsx_path)
+    try:
+        ts = read_tsx(path, 1, resolver, path.name)
+        img = load_tileset_image(ts, resolver)
+        if img is None:
+            return None, "无法读取图集图片"
+        pix = pil_to_qpixmap(img).scaled(
+            max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        cols = ts.columns or max(1, (img.width - 2 * ts.margin + ts.spacing)
+                                 // max(1, ts.tile_w + ts.spacing))
+        rows = ts.tilecount // cols if cols and ts.tilecount else max(
+            1, (img.height - 2 * ts.margin + ts.spacing)
+            // max(1, ts.tile_h + ts.spacing))
+        return pix, (f"{ts.name or path.name}  ·  {ts.tile_w}×{ts.tile_h}  ·  "
+                     f"{cols}×{rows} 格  ·  原图 {img.width}×{img.height}")
+    except Exception as exc:  # noqa: BLE001 - 坏图集只影响预览，不挡新建地图
+        return None, f"预览失败：{exc}"
 
 
 def build_new_document(profile, width: int, height: int, tsx_paths: list[str]):
@@ -119,7 +151,7 @@ class NewMapDialog(QDialog):
     def __init__(self, profile, parent=None):
         super().__init__(parent)
         self.setWindowTitle("新建地图")
-        self.resize(560, 560)
+        self.resize(860, 560)
 
         def spin(value, lo, hi):
             s = PlainSpinBox(self)
@@ -138,7 +170,8 @@ class NewMapDialog(QDialog):
         form.addRow("高度:", self.sp_height)
 
         self.list_tilesets = QListWidget(self)
-        self.list_tilesets.setSelectionMode(QAbstractItemView.NoSelection)
+        # 单击选中用于预览；勾选仍靠 ItemIsUserCheckable，两者互不干扰
+        self.list_tilesets.setSelectionMode(QAbstractItemView.SingleSelection)
         items = _available_tilesets(profile)
         for label, path in items:
             it = QListWidgetItem(label)
@@ -152,8 +185,8 @@ class NewMapDialog(QDialog):
             self.list_tilesets.addItem(ph)
 
         box_ts = QGroupBox("包含图集", self)
-        lay_ts = QVBoxLayout(box_ts)
-        lay_ts.addWidget(self.list_tilesets)
+        left = QVBoxLayout()
+        left.addWidget(self.list_tilesets)
         row_ts = QHBoxLayout()
         btn_all = QPushButton("全选", self)
         btn_none = QPushButton("清空", self)
@@ -162,7 +195,34 @@ class NewMapDialog(QDialog):
         row_ts.addWidget(btn_all)
         row_ts.addWidget(btn_none)
         row_ts.addStretch(1)
-        lay_ts.addLayout(row_ts)
+        left.addLayout(row_ts)
+
+        self.chk_preview = QCheckBox("预览", self)
+        self.chk_preview.setChecked(True)
+        self.lbl_preview = QLabel(self)
+        self.lbl_preview.setMinimumSize(_PREVIEW_MAX)
+        self.lbl_preview.setAlignment(Qt.AlignCenter)
+        self.lbl_preview.setStyleSheet(
+            f"background: {ASH}; border: 1px solid {ASH};")
+        self.lbl_preview_info = QLabel("单击左侧图集查看预览", self)
+        self.lbl_preview_info.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
+        self.lbl_preview_info.setWordWrap(True)
+        right = QVBoxLayout()
+        right.addWidget(self.chk_preview, 0, Qt.AlignRight)
+        right.addWidget(self.lbl_preview, 1)
+        right.addWidget(self.lbl_preview_info)
+        right.setStretch(1, 1)
+
+        lay_ts = QHBoxLayout(box_ts)
+        lay_ts.addLayout(left, 1)
+        lay_ts.addLayout(right, 0)
+
+        self._resolver = ResourceResolver(Path("__preview__.tmx"), profile)
+        self._preview_cache: dict[str, tuple[QPixmap | None, str]] = {}
+        self.list_tilesets.currentItemChanged.connect(self._on_preview_item)
+        self.chk_preview.toggled.connect(self._on_preview_toggled)
+        if items:
+            self.list_tilesets.setCurrentRow(0)
 
         self.lbl_hint = QLabel(
             f"已勾选 {self._checked_count()} 个图集 · 瓦片尺寸取自图集（默认 {RW_TILE_SIZE}×{RW_TILE_SIZE}）",
@@ -170,9 +230,15 @@ class NewMapDialog(QDialog):
         self.lbl_hint.setStyleSheet(f"color: {TEXT_DIM}; font-size: 11px;")
         self.list_tilesets.itemChanged.connect(self._on_check_changed)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        # 中文按钮 + 足够点击区域（与其他对话框统一）
+        buttons = QDialogButtonBox(self)
+        ok = buttons.addButton("确定", QDialogButtonBox.AcceptRole)
+        ok.setDefault(True)
+        cancel = buttons.addButton("取消", QDialogButtonBox.RejectRole)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        for btn in (ok, cancel):
+            btn.setMinimumSize(76, 28)
 
         layout = QVBoxLayout(self)
         layout.addWidget(box_size)
@@ -196,6 +262,29 @@ class NewMapDialog(QDialog):
     def _on_check_changed(self, *_):
         self.lbl_hint.setText(
             f"已勾选 {self._checked_count()} 个图集 · 瓦片尺寸取自图集（默认 {RW_TILE_SIZE}×{RW_TILE_SIZE}）")
+
+    def _on_preview_item(self, current: QListWidgetItem | None, *_):
+        if current is None:
+            self.lbl_preview.clear()
+            self.lbl_preview_info.setText("单击左侧图集查看预览")
+            return
+        path = current.data(Qt.UserRole)
+        if not path:
+            self.lbl_preview.clear()
+            self.lbl_preview_info.setText(current.text())
+            return
+        if path not in self._preview_cache:
+            self._preview_cache[path] = _tileset_preview(path, self._resolver)
+        pix, info = self._preview_cache[path]
+        if pix is not None and not pix.isNull():
+            self.lbl_preview.setPixmap(pix)
+        else:
+            self.lbl_preview.clear()
+        self.lbl_preview_info.setText(info)
+
+    def _on_preview_toggled(self, checked: bool):
+        self.lbl_preview.setVisible(checked)
+        self.lbl_preview_info.setVisible(checked)
 
     def values(self) -> dict:
         paths = []

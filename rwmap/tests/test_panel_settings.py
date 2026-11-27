@@ -37,17 +37,17 @@ class PanelSettingsTest(unittest.TestCase):
     def test_menu_bar_has_settings_as_fifth_menu(self):
         actions = self.w.menuBar().actions()
         self.assertEqual([a.text() for a in actions],
-                         ["文件", "编辑", "视图", "地图", "设置"])
+                         ["文件", "编辑", "视图", "地图", "工具", "设置"])
 
     def test_settings_menu_items(self):
         menu = self.w.menuBar().actions()[-1].menu()
         texts = [a.text() for a in menu.actions() if not a.isSeparator()]
-        self.assertEqual(texts, ["面板列表设置", "导入面板", "保存当前面板",
-                                 "触发器节点图"])
-        self.assertEqual(texts[0], self.w.act_panel_settings.text())
-        self.assertEqual(texts[1], self.w.act_import_panels.text())
-        self.assertEqual(texts[2], self.w.act_save_panels.text())
-        self.assertEqual(texts[3], self.w.act_trigger_graph.text())
+        self.assertEqual(texts, ["本地 AI 控制服务", "面板列表设置", "导入面板",
+                                 "保存当前面板", "触发器节点图"])
+        self.assertEqual(texts[1], self.w.act_panel_settings.text())
+        self.assertEqual(texts[2], self.w.act_import_panels.text())
+        self.assertEqual(texts[3], self.w.act_save_panels.text())
+        self.assertEqual(texts[4], self.w.act_trigger_graph.text())
         self.assertTrue(self.w.act_trigger_graph.isCheckable())
 
     def test_version_switch_removed_and_always_1_15(self):

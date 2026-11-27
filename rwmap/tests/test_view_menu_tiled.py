@@ -67,7 +67,7 @@ class TestMenuStructure(ViewMenuTestBase):
     def test_five_menus_unchanged(self):
         self.assertEqual(
             [a.text() for a in self.w.menuBar().actions()],
-            ["文件", "编辑", "视图", "地图", "设置"])
+            ["文件", "编辑", "视图", "地图", "工具", "设置"])
 
     def test_view_menu_items(self):
         texts = [a.text() for a in self.view_menu.actions()
@@ -114,8 +114,8 @@ class TestMenuStructure(ViewMenuTestBase):
         menu = self.w.menuBar().actions()[-1].menu()
         self.assertEqual([a.text() for a in menu.actions()
                           if not a.isSeparator()],
-                         ["面板列表设置", "导入面板", "保存当前面板",
-                          "触发器节点图"])
+                         ["本地 AI 控制服务", "面板列表设置", "导入面板",
+                          "保存当前面板", "触发器节点图"])
 
 
 class TestLayerViewOptions(ViewMenuTestBase):

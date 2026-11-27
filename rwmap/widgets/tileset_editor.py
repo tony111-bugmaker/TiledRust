@@ -420,7 +420,9 @@ class TilePropertyEditor(QWidget):
             QCheckBox::indicator:checked{{background:{THEME['accent']};
                 border:1px solid {THEME['accent']};}}
             QComboBox,QLineEdit{{background:{THEME['input']};color:{THEME['text']};
-                border:1px solid {INK};border-radius:4px;padding:3px 6px;font-size:12px;}}
+                border:1px solid {INK};border-radius:4px;padding:3px 6px;}}
+            QComboBox{{font-size:9pt;}}
+            QLineEdit{{font-size:12px;}}
             QComboBox:focus,QLineEdit:focus{{border:1px solid {THEME['accent']};}}
             QComboBox::drop-down{{border:0;}}
             QPushButton{{background:{ASH};color:{THEME['text']};border:1px solid {INK};

@@ -37,10 +37,15 @@ class MapPropertiesDialog(QDialog):
         row_btns.addWidget(btn_del)
         row_btns.addStretch(1)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        # 中文按钮 + 足够点击区域（与其他对话框统一）
+        buttons = QDialogButtonBox(self)
+        ok = buttons.addButton("确定", QDialogButtonBox.AcceptRole)
+        ok.setDefault(True)
+        cancel = buttons.addButton("取消", QDialogButtonBox.RejectRole)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        for btn in (ok, cancel):
+            btn.setMinimumSize(76, 28)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.table, 1)

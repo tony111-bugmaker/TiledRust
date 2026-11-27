@@ -71,7 +71,8 @@ class TransformToolbarTest(unittest.TestCase):
         self.assertLess(first, hint_idx)
         # 按钮与文字之间只有一条分隔符，hint 是最后一项
         self.assertTrue(acts[last + 1].isSeparator())
-        self.assertEqual(last + 2, hint_idx)
+        # 变换按钮之后又加了「标尺」按钮和分段输入框，中间不再是空的
+        self.assertGreaterEqual(hint_idx, last + 2)
         non_sep = [a for a in acts if not a.isSeparator()]
         self.assertEqual(non_sep[-1], bar._hint_action)
 

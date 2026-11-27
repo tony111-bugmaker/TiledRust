@@ -18,6 +18,28 @@ def props_xml(bag):
     return etree.tostring(el).decode()
 
 
+class EditorPrivatePropertyWriteTest(unittest.TestCase):
+    def test_private_properties_never_written_to_tmx(self):
+        """rwmap_* 是编辑器私有属性，写进 TMX 会让游戏报 Key was not used。"""
+        bag = PropertyBag(values={
+            "id": "wave1", "warmup": "10s",
+            "rwmap_node_pos": "0,0", "rwmap_group": "Alpha",
+            "rwmap_noc": "12,34",
+        })
+        bag.set("rwmap_node_pos", "0,0", "string")
+        obj = MapObject(object_id=7, name="第1波刷兵", type_="unitAdd",
+                        shape="point", x=10, y=20, properties=bag)
+        el = etree.Element("object")
+        _write_object(el, obj)
+        xml = etree.tostring(el, encoding="unicode")
+        self.assertNotIn("rwmap_", xml, "私有属性绝不能出现在 TMX 里")
+        self.assertIn('name="id"', xml)
+        self.assertIn('name="warmup"', xml)
+        # 只在写盘副本上过滤，内存里的布局数据仍保留
+        self.assertEqual(obj.properties.get("rwmap_node_pos"), "0,0")
+        self.assertEqual(obj.properties.get("rwmap_group"), "Alpha")
+
+
 class TeamEmptyWriteTest(unittest.TestCase):
     def test_empty_team_not_written(self):
         """空 team 不应写出，否则铁锈战争报 Unexpected integer value:''。"""
@@ -77,6 +99,17 @@ class TeamEmptyWriteTest(unittest.TestCase):
         self.assertIn('name="unit"', xml)
         self.assertIn('value="experimentalHoverTank"', xml)
         self.assertIn('name="team"', xml)
+
+    def test_attack_point_exports_no_type_keeps_name(self):
+        """进攻点 attackPoint 写回 TMX 必须空 type，靠 name=attack_point 识别。"""
+        self.assertEqual(GAME_TYPE_ALIASES["attackPoint"], "")
+        obj = MapObject(object_id=137, name="attack_point", type_="attackPoint",
+                        shape="point", x=100, y=200, properties=PropertyBag())
+        el = etree.Element("object")
+        _write_object(el, obj)
+        self.assertIsNone(el.get("type"), "进攻点不应写出 type")
+        self.assertIsNone(el.get("class"), "进攻点不应写 class")
+        self.assertEqual(el.get("name"), "attack_point")
 
     def test_truly_empty_type_still_exports_no_type(self):
         """纯空 type（map_info / 矩形等）行为不变：仍不写 type。"""

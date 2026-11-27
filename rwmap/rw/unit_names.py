@@ -155,6 +155,53 @@ def to_raw(text: str) -> str:
     return text
 
 
+def is_known_unit(raw: str) -> bool:
+    """raw 名是否在游戏单位目录里（大小写不敏感）。
+
+    注意 ``config/unit_names.json`` 来自游戏本体资源扫描，不含玩家另外装的
+    mod 里的自定义单位；这里只做「明显拼错」的提示，不阻断保存。
+    """
+    name = (raw or "").strip()
+    if not name:
+        return False
+    if name in CATALOG_BY_RAW:
+        return True
+    low = name.lower()
+    return any(r.lower() == low for r in CATALOG_BY_RAW)
+
+
+def unknown_units(text: str) -> list[str]:
+    """从 spawnUnits / 波次刷兵文本里挑出游戏不认识的单位名。
+
+    支持 ``lecT31*100``、``6 lecT31``、``lecT31(spawnChance=0.5)`` 等格式，
+    返回原始写法的去重列表（保持出现顺序）。空列表表示全部有效。
+    """
+    bad: list[str] = []
+    seen: set[str] = set()
+    for part in _split_top(text or ""):
+        body = part.strip()
+        if not body:
+            continue
+        # 去括号参数
+        body = body.partition("(")[0].strip()
+        # 数量前缀：6 heavyTank
+        m = re.match(r"^\d+\s+(.+)$", body)
+        if m:
+            body = m.group(1).strip()
+        elif "*" in body:
+            body = body.rpartition("*")[0].strip()
+        if not body:
+            continue
+        raw = to_raw(body)
+        if is_known_unit(raw):
+            continue
+        key = raw.lower()
+        if key not in seen:
+            seen.add(key)
+            bad.append(raw)
+    return bad
+
+
 def split_units(text: str) -> list[str]:
     """中文 / 英文单位列表（逗号、顿号、空格分隔）-> raw 列表。"""
     pieces = re.split(r"[,，、\s]+", (text or "").strip())
@@ -212,26 +259,96 @@ def build_spawn_units(raw_units: list[str]) -> str:
     )
 
 
-# ---------------------------------------------------------------- 权重
-# 「随机生成单位」里写成 单位:权重（也接受 ×/*），省略权重视为 1。
-# 例：重型坦克:3,坦克:2,侦察车:1  ->  50% / 33.3% / 16.7%
-_WEIGHT_RE = re.compile(r"^(?P<name>.*?)\s*[:：×*xX]\s*(?P<w>\d+(?:\.\d+)?)$")
+def parse_fixed_units(text: str) -> list[tuple[str, int, str]]:
+    """解析「生成单位」的 spawnUnits：``heavyTank*10,builder*2``。
 
-
-def parse_weighted(text: str) -> list[tuple[str, float]]:
-    """``重型坦克:3, 坦克:2`` -> ``[("heavyTank", 3.0), ("tank", 2.0)]``。
-
-    省略权重按 1 处理；同一个单位写两次会合并权重（累加）。
+    每段拆成 ``(raw, 数量, 括号参数原样)``；括号里的 spawnChance 等参数
+    不在本函数解释，原样保留，避免重排单位时丢掉地图作者写的额外参数。
     """
-    out: list[tuple[str, float]] = []
+    out: list[tuple[str, int, str]] = []
+    for part in _split_top(text):
+        name, sep, rest = part.partition("(")
+        params = ("(" + rest) if sep else ""
+        name = name.strip()
+        m = re.match(r"^(.*?)\s*\*\s*(\d+)$", name)
+        count = 1
+        if m:
+            name, count = m.group(1).strip(), int(m.group(2))
+        raw = to_raw(name)
+        if raw:
+            out.append((raw, max(1, count), params))
+    return out
+
+
+def format_fixed_units(units: list[tuple[str, int, str]]) -> str:
+    """``[(raw, 数量, 括号参数)]`` -> ``heavyTank*10,builder*2(...)``。"""
+    parts = []
+    for raw, count, params in units:
+        base = raw if count <= 1 else f"{raw}*{count}"
+        parts.append(base + (params or ""))
+    return ",".join(parts)
+
+
+def parse_wave_units(text: str) -> list[tuple[str, int]]:
+    """解析生存波次的刷兵列表 -> ``[(raw, 数量), ...]``。
+
+    同时接受原版 ``6 heavyTank,2 bugMelee``、生成器风格 ``heavyTank*6``
+    和中文名；数量缺省为 1。写回时用 :func:`format_wave_units`，保证
+    ``survivalWaves`` 编译出来的仍是游戏认识的原版格式。
+    """
+    out: list[tuple[str, int]] = []
+    for part in _split_top(text):
+        body = part.strip()
+        if not body:
+            continue
+        count = 1
+        m = re.match(r"^(\d+)\s+(.+)$", body)
+        if m:
+            count, body = max(1, int(m.group(1))), m.group(2).strip()
+        elif "*" in body:
+            name, _, num = body.rpartition("*")
+            if name.strip() and num.strip().isdigit():
+                body, count = name.strip(), max(1, int(num.strip()))
+        raw = to_raw(body)
+        if raw:
+            out.append((raw, count))
+    return out
+
+
+def format_wave_units(units: list[tuple[str, int]]) -> str:
+    """``[(raw, 数量)]`` -> ``6 heavyTank,2 bugMelee``（原版刷兵格式）。"""
+    return ",".join(raw if count <= 1 else f"{count} {raw}"
+                    for raw, count in units)
+
+
+# ---------------------------------------------------------------- 权重 / 数量
+# 「随机生成单位」里写成 单位:权重#数量（权重分隔符也接受 ×/*，数量必须 #）。
+# 例：重型坦克:3#2,坦克:2,侦察车:1  ->  权重 3:2:1，其中重型坦克每次刷 2 个。
+# 权重省略视为 1，数量省略视为 1；# 是编辑器内部记号，写盘时展开成 RW 的
+# `单位*数量(spawnChance=...,maxSpawnLimit=数量)`。
+_WEIGHT_RE = re.compile(r"^(?P<name>.*?)\s*[:：×*xX]\s*(?P<w>\d+(?:\.\d+)?)$")
+_COUNT_RE = re.compile(r"^(?P<body>.*?)\s*#\s*(?P<n>\d+)$")
+
+
+def parse_units(text: str) -> list[tuple[str, float, int]]:
+    """``重型坦克:3#2, 坦克:2`` -> ``[("heavyTank",3.0,2),("tank",2.0,1)]``。
+
+    权重省略按 1、数量省略按 1；同一单位写两次合并权重（累加），数量取最大。
+    """
+    out: list[tuple[str, float, int]] = []
     index: dict[str, int] = {}
     for piece in re.split(r"[,，、\s]+", (text or "").strip()):
         piece = piece.strip()
         if not piece:
             continue
-        m = _WEIGHT_RE.match(piece)
-        if m:
-            name, weight = m.group("name").strip(), float(m.group("w"))
+        count = 1
+        cm = _COUNT_RE.match(piece)
+        if cm:
+            piece = cm.group("body").strip()
+            count = max(1, int(cm.group("n")))
+        wm = _WEIGHT_RE.match(piece)
+        if wm:
+            name, weight = wm.group("name").strip(), float(wm.group("w"))
         else:
             name, weight = piece, 1.0
         raw = to_raw(name)
@@ -239,22 +356,35 @@ def parse_weighted(text: str) -> list[tuple[str, float]]:
             continue
         if raw in index:                      # 重复项合并
             i = index[raw]
-            out[i] = (raw, out[i][1] + weight)
+            prev_raw, prev_w, prev_n = out[i]
+            out[i] = (raw, prev_w + weight, max(prev_n, count))
         else:
             index[raw] = len(out)
-            out.append((raw, weight))
+            out.append((raw, weight, count))
     return out
 
 
-def format_weighted(pairs: list[tuple[str, float]]) -> str:
-    """``[("heavyTank",3)]`` -> ``heavyTank:3``；权重 1 时省略后缀。"""
+def parse_weighted(text: str) -> list[tuple[str, float]]:
+    """二元组兼容出口：数量被丢弃（默认 1）。``[("heavyTank", 3.0)]``。"""
+    return [(raw, w) for raw, w, _n in parse_units(text)]
+
+
+def format_units(pairs: list[tuple[str, float, int]]) -> str:
+    """``[("heavyTank",3,2)]`` -> ``heavyTank:3#2``；权重/数量为 1 时省略。"""
     parts = []
-    for raw, weight in pairs:
-        if (weight or 0) == 1:
-            parts.append(raw)
-        else:
-            parts.append(f"{raw}:{('%g' % weight)}")
+    for raw, weight, count in pairs:
+        seg = raw
+        if (weight or 0) != 1:
+            seg += f":{('%g' % weight)}"
+        if (count or 1) != 1:
+            seg += f"#{count}"
+        parts.append(seg)
     return ",".join(parts)
+
+
+def format_weighted(pairs: list[tuple[str, float]]) -> str:
+    """二元组兼容出口：输出永远不带数量。"""
+    return format_units([(raw, w, 1) for raw, w in pairs])
 
 
 def overall_chances(weights: list[float]) -> list[float]:
@@ -288,30 +418,66 @@ def weighted_chances(weights: list[float]) -> list[float]:
     return out
 
 
-def build_spawn_units_weighted(pairs: list[tuple[str, float]]) -> str:
-    """按权重生成 spawnUnits 串；权重 ≤0 的单位视为「不参与随机」被剔除。"""
+def build_spawn_units_weighted(pairs: list[tuple[str, float]],
+                               counts: list[int] | None = None) -> str:
+    """按权重生成 spawnUnits 串；权重 ≤0 的单位视为「不参与随机」被剔除。
+
+    ``counts`` 可选：与 pairs 等长的数量列表。数量 n>1 时写成
+    ``单位*n(spawnChance=c,maxSpawnLimit=n)``（RW 的真实刷兵语法，见
+    「抽奖生存」等原图），n=1 时保持老的 ``maxSpawnLimit=1`` 写法。
+    """
     live = [(u, w) for u, w in pairs if u and (w or 0) > 0]
     if not live:
         return ""
     chances = weighted_chances([w for _u, w in live])
-    return ",".join(
-        f"{u}(spawnChance={c:g},maxSpawnLimit=1)"
-        for (u, _w), c in zip(live, chances)
-    )
+    parts = []
+    for i, ((u, _w), c) in enumerate(zip(live, chances)):
+        n = int(counts[i]) if counts is not None and i < len(counts) else 1
+        n = max(1, n)
+        if n > 1:
+            parts.append(f"{u}*{n}(spawnChance={c:g},maxSpawnLimit={n})")
+        else:
+            parts.append(f"{u}(spawnChance={c:g},maxSpawnLimit=1)")
+    return ",".join(parts)
 
 
-def weights_from_spawn_units(text: str) -> list[tuple[str, float]] | None:
-    """能安全反推时，把链式 spawnUnits 还原成 ``[(raw, 权重)]``，否则 None。
+def build_spawn_units_full(pairs: list[tuple[str, float, int]]) -> str:
+    """三元组入口：``[(raw, 权重, 数量)]`` -> spawnUnits 串。"""
+    return build_spawn_units_weighted(
+        [(u, w) for u, w, _n in pairs], [n for _u, _w, n in pairs])
 
-    只有「每段都是 ``单位(spawnChance=c,maxSpawnLimit=1)``、最后一段 c=1」
-    这种纯抽签串才反推；且要求反推出的权重能**逐字还原**原串，避免把带
-    ``offsetRandomX`` / ``falling`` / ``单位*数量`` 的普通刷兵串误当权重。
+
+_NAME_COUNT_RE = re.compile(r"^(?P<raw>.+?)\s*\*\s*(?P<n>\d+)$")
+
+
+def units_from_spawn_units(text: str) -> list[tuple[str, float, int]] | None:
+    """能安全反推时还原 ``[(raw, 权重, 数量)]``，否则 None。
+
+    只接受「抽签链」：每段都带 ``spawnChance``、最后一段 c=1，且数量写法
+    自洽——``单位*N`` 必须配 ``maxSpawnLimit=N``；无 ``*N`` 时必须是
+    ``maxSpawnLimit=1``。并要求反推结果能**逐字还原**原串，避免把带
+    ``offsetRandomX`` / ``falling`` 的普通刷兵串误判成权重表。
     """
     parsed = parse_spawn_units(text)
     if len(parsed) < 2:
         return None
-    if any(mx != 1 or c is None for _n, c, mx in parsed):
-        return None
+    names: list[str] = []
+    counts: list[int] = []
+    for name, c, mx in parsed:
+        m = _NAME_COUNT_RE.match(name)
+        if m:
+            n = max(1, int(m.group("n")))
+            if mx != n:                       # *N 必须配 maxSpawnLimit=N
+                return None
+            names.append(m.group("raw"))
+            counts.append(n)
+        else:
+            if mx != 1:                       # 没写 *N 就只能是 maxSpawnLimit=1
+                return None
+            names.append(name)
+            counts.append(1)
+        if c is None:
+            return None
     chances = [float(c) for _n, c, _m in parsed]
     if abs(chances[-1] - 1.0) > 1e-6:
         return None
@@ -337,15 +503,21 @@ def weights_from_spawn_units(text: str) -> list[tuple[str, float]] | None:
             break
     if not weights:
         return None
-    pairs = [(n, w) for (n, _c, _m), w in zip(parsed, weights)]
-    rebuilt = parse_spawn_units(build_spawn_units_weighted(pairs))
+    triples = [(n, w, cnt) for n, w, cnt in zip(names, weights, counts)]
+    rebuilt = parse_spawn_units(build_spawn_units_full(triples))
     # 用数值比对而不是字符串比对：概率可能写成 0.333333 也可能写成 0.3333
-    if [n for n, _c, _m in rebuilt] != [n for n, _c, _m in parsed]:
+    if [n for n, _c, _m in rebuilt] != [name for name, _c, _m in parsed]:
         return None
     for (_n, c, _m), (_n2, c2, _m2) in zip(parsed, rebuilt):
         if c2 is None or abs(float(c) - float(c2)) > 1e-4:
             return None
-    return pairs
+    return triples
+
+
+def weights_from_spawn_units(text: str) -> list[tuple[str, float]] | None:
+    """二元组兼容出口：反推时丢弃数量。"""
+    triples = units_from_spawn_units(text)
+    return [(u, w) for u, w, _n in triples] if triples else None
 
 
 def describe_weights(pairs: list[tuple[str, float]]) -> str:

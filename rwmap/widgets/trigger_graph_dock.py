@@ -33,7 +33,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen,
-    QPixmap, QPolygonF,
+    QPixmap, QPolygonF, QUndoCommand,
 )
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDockWidget, QGraphicsItem, QGraphicsLineItem,
@@ -48,8 +48,13 @@ from ..document.map_document import allocate_trigger_id, used_trigger_ids
 from ..document.map_object import object_uid
 from ..document.properties import (
     EDITOR_GROUP_PROPERTY, EDITOR_NODE_POS_PROPERTY,
-    HIDDEN_EDITOR_PROPERTIES,
+    HIDDEN_EDITOR_PROPERTIES, MERGE_GROUP_PROPERTY, MERGE_PRIMARY_PROPERTY,
+    WAVE_NEXT_PROPERTY, WAVE_LINK_PROPERTY, WAVE_DISPATCH_MARK_PROPERTY,
+    WAVE_SPAWN_PROXY_MARK_PROPERTY,
+    WAVE_TABLE_NEXT_PROPERTY, WAVE_GEN_TYPE, WAVE_MARK_PROPERTY,
+    WAVE_NAME_PROPERTY, WAVE_TIME_PROPERTY, WAVE_UNITS_PROPERTY,
 )
+from ..rw.wave_gen import is_wave_node, is_wave_table_node, next_wave_name
 from ..theme import ASH, INK, PANEL_BORDER_QSS, TEXT, TEXT_DIM, qc
 from .dock_chrome import install_title_bar
 from .trigger_inspector import (
@@ -81,6 +86,14 @@ EDGE_SPECS = {
     "whenDeactivatedIds": ("停用前置", EDGE_COLORS["whenDeactivatedIds"], "reverse"),
     "requiredFor": ("需要前置", EDGE_COLORS["requiredFor"], "reverse"),
     "next": ("下一步", EDGE_COLORS["next"], "forward"),
+    # 波次生成器专用「下一波」连线：走私有属性 rwmap_wave_next，导出时被剔除，
+    # 编排数据收进 rwmap_layout 根属性，游戏零干扰。
+    WAVE_NEXT_PROPERTY: ("下一波", EDGE_COLORS["next"], "forward"),
+    # 波次节点 → 播报 / 奖励等普通触发器：私有属性存编排；保存时编译成
+    # 隐藏的 delay + alsoActivate 触发器，游戏里到点真正触发。
+    WAVE_LINK_PROPERTY: ("波次关联", EDGE_COLORS["alsoActivate"], "forward"),
+    # 官方波次表节点专用连线：走私有属性，游戏零干扰；可连到任意触发器节点。
+    WAVE_TABLE_NEXT_PROPERTY: ("波次关联", EDGE_COLORS["next"], "forward"),
     "nextUnit": ("下一单位", EDGE_COLORS["nextUnit"], "forward"),
     "parentTrigger": ("父触发器", EDGE_COLORS["parentTrigger"], "reverse"),
 }
@@ -150,6 +163,55 @@ def _parse_ids(raw) -> list[str]:
     return out
 
 
+def _display_name(node) -> str:
+    """节点的可区分显示名：重名对象（几十个 attack_point）带上编号。
+
+    Tiled object_id 在铁锈地图里可能重复，所以优先用节点 key 尾部的唯一
+    `#n` 序号，其次用 object_id。单纯 obj.label 全是「attack_point」，
+    用户无法分辨连线连到了哪一个。
+    """
+    label = getattr(getattr(node, "obj", None), "label", "") or "?"
+    key = str(getattr(node, "key", "") or "")
+    oid = str(getattr(getattr(node, "obj", None), "object_id", "") or "")
+    suffix = ""
+    if "#" in key:
+        suffix = key[key.rfind("#"):]          # 重复 object_id 的唯一序号，如 #1
+    elif oid:
+        suffix = f"#{oid}"
+    return f"{label}{suffix}"
+
+
+def _merge_signature(obj) -> tuple:
+    """「一样设置」的判据：类型 + 形状 + 公开属性。
+
+    名字允许不同（整合后统一改名正是需求），id / 连线 / 私有属性忽略：
+    id 是每个对象各自的地址，连线会在整合时全部断开，私有属性是编排数据。
+    """
+    ignore = set(LINK_PROPS) | set(HIDDEN_EDITOR_PROPERTIES) | {"id"}
+    props = tuple(sorted((str(k), str(v))
+                         for k, v in obj.properties.values.items()
+                         if k not in ignore))
+    return (effective_type(obj), str(obj.shape), props)
+
+
+def _obj_ref_names(obj) -> set[str]:
+    """一个对象可能被别人用哪些字符串引用（小写）。"""
+    names = {
+        str(obj.properties.get("id") or ""),
+        str(getattr(obj, "object_id", "") or ""),
+        str(obj.name or ""), str(getattr(obj, "label", "") or ""),
+        str(obj.properties.get("name") or ""),
+        str(obj.properties.get("label") or ""),
+    }
+    return {n.strip().lower() for n in names if n.strip()}
+
+
+def _drop_prop(props, key: str) -> None:
+    props.values.pop(key, None)
+    props.types.pop(key, None)
+    props.text_props.discard(key)
+
+
 def _split_refs(raw) -> list[str]:
     """按**括号外**的逗号 / 分号 / 空白切分引用，保留 token 原文（含生成参数）。
 
@@ -184,7 +246,11 @@ def _ref_name(token: str) -> str:
 
 
 def _node_ref_names(node: GraphNode) -> set[str]:
-    """一个节点可能被哪些字符串引用（小写）：自定义 id / object id / 名字 / 标签。"""
+    """一个节点可能被哪些字符串引用（小写）：自定义 id / object id / 名字 / 标签。
+
+    私有「波次关联」用的是节点唯一 key（可能带 #idx），整合体的每个成员 key
+    也要认，否则解散整合前删线会漏掉这些引用。
+    """
     obj = node.obj
     names = {
         str(node.tid), str(getattr(obj, "object_id", "")),
@@ -192,7 +258,9 @@ def _node_ref_names(node: GraphNode) -> set[str]:
         str(getattr(obj, "label", "") or ""),
         str(obj.properties.get("name") or ""),
         str(obj.properties.get("label") or ""),
+        str(node.key),
     }
+    names.update(str(k) for k in getattr(node, "merge_member_keys", ()) or ())
     return {n.strip().lower() for n in names if n and n.strip()}
 
 
@@ -229,6 +297,15 @@ class GraphNode:
     x: float = 0.0
     y: float = 0.0
     group: str = ""        # 编辑器私有分组名（EDITOR_GROUP_PROPERTY 的值）
+    # 整合体：只有代表节点会进 data.nodes；members 含代表节点自己在内的全部
+    # 真实对象，右侧面板 / 连线 / 地图高亮都以这份成员表为准。
+    merge_group: str = ""
+    merge_count: int = 0
+    merge_members: tuple = ()
+    # 整合体每个成员的节点唯一 key（含 #idx 后缀）。私有「波次关联」连线
+    # 要给每个成员各写一条引用；整合时这些 key 都折叠到代表节点上显示，
+    # 解散整合后就能原样展开成 N 条独立连线。
+    merge_member_keys: tuple = ()
 
 
 @dataclass
@@ -244,6 +321,15 @@ class GraphData:
     edges: list[GraphEdge] = field(default_factory=list)
     dangling: int = 0
     layer_names: list[str] = field(default_factory=list)
+
+
+def _is_auto_generated(obj) -> bool:
+    """保存时生成的隐藏触发器：波次调度器 + attack_point 影子刷兵器。"""
+    props = getattr(obj, "properties", None)
+    if props is None:
+        return False
+    return (str(props.get(WAVE_DISPATCH_MARK_PROPERTY) or "").strip() == "1"
+            or str(props.get(WAVE_SPAWN_PROXY_MARK_PROPERTY) or "").strip() == "1")
 
 
 def collect_graph(doc, layer_filter=None) -> GraphData:
@@ -273,6 +359,8 @@ def collect_graph(doc, layer_filter=None) -> GraphData:
     # 大量重复（实测一张图 160 个对象全是 1），用后者会让 #idx 唯一后缀
     # 全部互相覆盖，第二遍建节点时塌缩成两三个节点。
     key_of: dict[int, str] = {}
+    obj_by_key: dict[str, object] = {}
+    by_key: dict[str, str] = {}
     by_tid: dict[str, str] = {}
     by_oid: dict[str, str] = {}
     by_name: dict[str, str] = {}
@@ -281,15 +369,58 @@ def collect_graph(doc, layer_filter=None) -> GraphData:
         if raw:
             by_name.setdefault(str(raw).strip().lower(), key)
 
-    # 第一遍：跨全部对象层建索引，保证跨层引用也能解析到目标节点
+    # 第一遍 A：给每个对象分配唯一 key，并收集整合体（组 id → 成员 / 代表）。
+    merge_groups: dict[str, dict] = {}
     for layer in all_layers:
         for obj in layer.objects:
+            # 保存时生成的隐藏触发器，不参与节点图编排
+            if _is_auto_generated(obj):
+                continue
             base = f"{layer.name}::{obj.object_id}"
             idx = seen.get(base, 0)
             seen[base] = idx + 1
             key = base if idx == 0 else f"{base}#{idx}"
             key_of[id(obj)] = key
+            obj_by_key[key] = obj
+            gid = str(obj.properties.get(MERGE_GROUP_PROPERTY) or "").strip()
+            if not gid:
+                continue
+            info = merge_groups.setdefault(gid, {"primary": "", "members": []})
+            info["members"].append(key)
+            if str(obj.properties.get(MERGE_PRIMARY_PROPERTY) or "").strip() == "1":
+                info["primary"] = key
+
+    # 整合体里「非代表」的成员不单独渲染；索引也不收它们的名字 / id，
+    # 这样别的节点引用同名对象时会落到代表节点上（折叠后仍看得到那条线）。
+    hidden_keys: set[str] = set()
+    hidden_to_primary: dict[str, str] = {}
+    merge_primary: dict[str, str] = {}
+    for gid, info in merge_groups.items():
+        primary = info["primary"] or info["members"][0]
+        merge_primary[gid] = primary
+        for k in info["members"]:
+            if k != primary:
+                hidden_keys.add(k)
+                hidden_to_primary[k] = primary
+                # 私有连线引用写的是节点 key，不是名字 / id。整合期间把成员
+                # key 也解析到代表节点，否则那 N 条引用会被算成悬空连线。
+                by_key[k] = primary
+
+    # 第一遍 B：跨全部对象层建引用索引，保证跨层引用也能解析到目标节点
+    for layer in all_layers:
+        for obj in layer.objects:
+            if _is_auto_generated(obj):
+                continue
+            key = key_of[id(obj)]
             tid = str(obj.properties.get("id") or obj.object_id)
+            if key in hidden_keys:
+                # 整合体成员自己的 id 仍要能解析回代表节点：别的触发器连到
+                # 整合体时会写所有成员的 id，漏掉就会被算成悬空引用。
+                primary_key = hidden_to_primary[key]
+                by_tid.setdefault(tid, primary_key)
+                by_oid.setdefault(str(obj.object_id), primary_key)
+                continue
+            by_key[key] = key
             by_tid.setdefault(tid, key)
             by_oid.setdefault(str(obj.object_id), key)
             # 其它地图常按触发器「名字 / 标签」互相引用，而不仅用数字 id
@@ -298,17 +429,36 @@ def collect_graph(doc, layer_filter=None) -> GraphData:
             add_name(obj.properties.get("name"), key)
             add_name(obj.properties.get("label"), key)
 
-    # 第二遍：只把要显示的层的对象建成节点
+    # 第二遍：只把要显示的层的对象建成节点；整合体的普通成员折叠掉。
     for layer in layers_for_nodes:
         for obj in layer.objects:
+            if _is_auto_generated(obj):
+                continue
             key = key_of[id(obj)]
+            if key in hidden_keys:
+                continue
             tid = str(obj.properties.get("id") or obj.object_id)
             grp = obj.properties.get(EDITOR_GROUP_PROPERTY) or ""
-            data.nodes[key] = GraphNode(key, obj, layer.name, tid, group=grp)
+            gid = str(obj.properties.get(MERGE_GROUP_PROPERTY) or "").strip()
+            member_keys = list(merge_groups.get(gid, {}).get("members", ())) if gid else []
+            primary = merge_primary.get(gid, "")
+            if primary in member_keys:      # 代表节点放第一位：面板 / 地图高亮都以它为主
+                member_keys.remove(primary)
+                member_keys.insert(0, primary)
+            members = tuple(obj_by_key[k] for k in member_keys if k in obj_by_key)
+            data.nodes[key] = GraphNode(
+                key, obj, layer.name, tid, group=grp,
+                merge_group=gid, merge_count=len(members) if gid else 0,
+                merge_members=members,
+                merge_member_keys=tuple(k for k in member_keys if k in obj_by_key))
 
     def resolve(raw_id: str):
         r = str(raw_id).strip()
-        return by_tid.get(r) or by_oid.get(r) or by_name.get(r.lower())
+        # 私有「波次关联」引用写的是节点唯一 key（layer::object_id[#n]），
+        # 必须优先按 key 解析：重名对象（如几十个都叫 attack_point）靠 name
+        # 解析会全部塌缩到第一个，导致只能关联一个、且连到错误的目标。
+        # 旧的 name / id 引用继续走后面的分支，向后兼容。
+        return by_key.get(r) or by_tid.get(r) or by_oid.get(r) or by_name.get(r.lower())
 
     for node in data.nodes.values():
         props = node.obj.properties
@@ -458,15 +608,25 @@ class NodeItem(QGraphicsObject):
         painter.drawText(QRectF(22, 1, NODE_W - 68, HEADER_H - 2),
                          Qt.AlignLeft | Qt.AlignVCenter,
                          _elide(painter, title, NODE_W - 72))
-        # 右上角 trigger id
+        # 右上角：普通节点显示 trigger id；整合体换成醒目的「整合×N」徽标
         f2 = QFont(painter.font())
         f2.setPointSize(8)
         f2.setBold(False)
         painter.setFont(f2)
-        painter.setPen(QPen(QColor(TEXT)))
-        painter.drawText(QRectF(NODE_W - 48, 1, 44, HEADER_H - 2),
-                         Qt.AlignRight | Qt.AlignVCenter,
-                         _elide(painter, "#" + self.node.tid, 42))
+        merge_count = int(getattr(self.node, "merge_count", 0) or 0)
+        if merge_count > 1:
+            badge = f"整合×{merge_count}"
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor("#d8a53a")))
+            painter.drawRoundedRect(QRectF(NODE_W - 62, 3, 58, HEADER_H - 6), 4, 4)
+            painter.setPen(QPen(QColor("#1b1b1b")))
+            painter.drawText(QRectF(NODE_W - 62, 3, 58, HEADER_H - 6),
+                             Qt.AlignCenter, _elide(painter, badge, 56))
+        else:
+            painter.setPen(QPen(QColor(TEXT)))
+            painter.drawText(QRectF(NODE_W - 48, 1, 44, HEADER_H - 2),
+                             Qt.AlignRight | Qt.AlignVCenter,
+                             _elide(painter, "#" + self.node.tid, 42))
 
         # 主体：与网页版一致，第一行「类型 | 中文类型名」，下面按类型模板显示中文属性标签
         f3 = QFont(painter.font())
@@ -484,7 +644,7 @@ class NodeItem(QGraphicsObject):
 
         props = obj.properties
         rows: list[tuple[str, str]] = []
-        max_rows = 2 if self.group else 3
+        max_rows = 2 if (self.group or merge_count > 1) else 3
         for key in summary_keys(effective_type(obj)) + tuple(props.values.keys()):
             if (key == "id" or key in LINK_PROPS
                     or key in HIDDEN_EDITOR_PROPERTIES
@@ -509,8 +669,21 @@ class NodeItem(QGraphicsObject):
                              _elide(painter, value.replace("\n", " "), NODE_W - 95))
             y += 15
 
+        # 整合体徽标：一眼看出这个节点代表多个真实对象
+        if merge_count > 1:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor("#d8a53a")))
+            painter.drawRoundedRect(QRectF(9, NODE_H - 16, 8, 8), 2, 2)
+            painter.setPen(QPen(QColor("#d8a53a")))
+            f = QFont(painter.font())
+            f.setPointSize(8)
+            painter.setFont(f)
+            painter.drawText(QRectF(22, NODE_H - 17, NODE_W - 30, 12),
+                             Qt.AlignLeft | Qt.AlignVCenter,
+                             _elide(painter, f"整合体 · 同步 {merge_count} 个对象",
+                                    NODE_W - 32))
         # 分组徽标（编辑器私有属性，不在右侧属性面板显示）
-        if self.group:
+        elif self.group:
             gcol = (self.graph.dock._color_for_group(self.group)
                     if self.graph.dock._color_by_group else QColor("#7fb2ff"))
             painter.setPen(Qt.NoPen)
@@ -592,6 +765,31 @@ def _cubic_at(c: tuple, t: float) -> QPointF:
     w0, w1, w2, w3 = u*u*u, 3*u*u*t, 3*u*t*t, t*t*t
     return QPointF(w0*a.x() + w1*b.x() + w2*d.x() + w3*e.x(),
                    w0*a.y() + w1*b.y() + w2*d.y() + w3*e.y())
+
+
+def _point_cubic_distance(p: QPointF, c: tuple, samples: int = 28) -> float:
+    """点到三次贝塞尔曲线的最短距离（采样近似）。
+
+    EdgeItem.shape() 故意返回空路径（不拦截平移），所以画布右键点连线不会命中；
+    这里用采样算距离，给「右键连线删除」提供命中判定。返回场景坐标距离。
+    """
+    best2 = float("inf")
+    px, py = p.x(), p.y()
+    prev = c[0]
+    for i in range(1, samples + 1):
+        cur = _cubic_at(c, i / samples)
+        dx, dy = cur.x() - prev.x(), cur.y() - prev.y()
+        seg2 = dx * dx + dy * dy
+        if seg2 > 0:
+            t = max(0.0, min(1.0, ((px - prev.x()) * dx + (py - prev.y()) * dy) / seg2))
+            qx, qy = prev.x() + t * dx, prev.y() + t * dy
+        else:
+            qx, qy = prev.x(), prev.y()
+        d2 = (px - qx) ** 2 + (py - qy) ** 2
+        if d2 < best2:
+            best2 = d2
+        prev = cur
+    return best2 ** 0.5
 
 
 def _lerp_point(a: QPointF, b: QPointF, t: float) -> QPointF:
@@ -1197,6 +1395,8 @@ class GraphView(QGraphicsView):
         event.accept()
 
     def mousePressEvent(self, event):
+        # 每次按下先清掉上次右键的连线命中，避免跨次残留导致误弹菜单
+        self._right_hit_edge = None
         if event.button() == Qt.LeftButton:
             # 先判断是否抓在节点端口（黄点）上：是则进入「拖拽连线」模式
             hit = self._hit_port(self.mapToScene(event.pos()))
@@ -1224,6 +1424,12 @@ class GraphView(QGraphicsView):
             if dock is not None:
                 dock._dragging_key = item.node.key
         elif event.button() == Qt.RightButton:
+            # 右键连线上：不启动框选，留给 mouseReleaseEvent 弹连线菜单（含删除）。
+            # EdgeItem.shape() 为空，itemAt 命中不到，需几何判定。
+            self._right_hit_edge = self.hit_edge_at(event.pos())
+            if self._right_hit_edge is not None:
+                event.accept()
+                return
             # 右键空白框选：拉一个矩形选区，松开后选中其中的节点
             if not isinstance(self.itemAt(event.pos()), NodeItem):
                 self._band_start = self.mapToScene(event.pos())
@@ -1300,6 +1506,18 @@ class GraphView(QGraphicsView):
             self.viewport().unsetCursor()
             event.accept()
             return
+        # 连线上右键：弹出连线菜单（改线型 / 删除这条连线）。
+        # 在 mousePressEvent 里已经用几何判定记下 _right_hit_edge，且没有建 band。
+        if (event.button() == Qt.RightButton
+                and getattr(self, "_right_hit_edge", None) is not None
+                and dock is not None):
+            p = event.position().toPoint()
+            menu = dock.edge_context_menu(self._right_hit_edge)
+            menu.setAttribute(Qt.WA_DeleteOnClose, True)
+            menu.popup(self.viewport().mapToGlobal(p))
+            self._right_hit_edge = None
+            event.accept()
+            return
         # 节点上右键：view / viewport 都是 NoContextMenu（防止框选结束闪空菜单），
         # Qt 不会派发 QContextMenuEvent，NodeItem.contextMenuEvent 永远收不到。
         # 所以在这里按鼠标释放位置显式弹菜单；右键按下节点时没有建 band，
@@ -1351,8 +1569,8 @@ class GraphView(QGraphicsView):
                     it.setSelected(True)
             finally:
                 self.scene().blockSignals(False)
-            # 一次回调完成：同组扩容 + 更新 _selected_keys + 重建一次属性面板
-            # + 只回主画布一次。
+            # 一次回调完成：更新 _selected_keys + 重建一次属性面板
+            # + 只回主画布一次（框中谁就选谁，同组不连带）。
             dock._on_selection_changed()
             event.accept()
             return
@@ -1531,6 +1749,43 @@ class GraphView(QGraphicsView):
                 best, best_d = item, d
         return best
 
+    def hit_edge_at(self, screen_pos):
+        """屏幕坐标处的连线（返回 GraphEdge），用于右键连线删除。
+
+        容差按屏幕像素固定（默认 7px），不随缩放变化——任何缩放下都好点。
+        EdgeItem 的 shape() 为空、不接收鼠标，所以不能靠 itemAt，必须自己算
+        点到贝塞尔曲线的距离。只检测当前 live 的连线（视口内可见的那些）。
+        """
+        dock = self.scene().dock if self.scene() is not None else None
+        if dock is None:
+            return None
+        tol_px = 7.0
+        sp = self.mapToScene(screen_pos)
+        # 屏幕像素 → 场景距离：用视口变换的水平缩放倒数
+        scale = self.transform().m11() or 1.0
+        tol_scene = tol_px / abs(scale)
+        best, best_d = None, None
+        for item in dock.edge_items:
+            if not item.isVisible() or item.src is None or item.dst is None:
+                continue
+            controls = _edge_controls(item.src.port_out(), item.dst.port_in(),
+                                      item.lane, item.total)
+            if not item.boundingRect().adjusted(-tol_scene, -tol_scene,
+                                                tol_scene, tol_scene).contains(sp):
+                continue
+            d = _point_cubic_distance(sp, controls)
+            if d <= tol_scene and (best_d is None or d < best_d):
+                src_node = getattr(item.src, "node", None)
+                dst_node = getattr(item.dst, "node", None)
+                if src_node is None or dst_node is None:
+                    continue
+                edge = next((e for e in dock.data.edges
+                             if e.src == src_node.key and e.dst == dst_node.key
+                             and e.kind == item.kind), None)
+                if edge is not None:
+                    best, best_d = edge, d
+        return best
+
     def keyPressEvent(self, event):
         # 画布上不支持键盘删除（避免误删）；删除请用右侧属性面板的按钮
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
@@ -1544,6 +1799,27 @@ class GraphView(QGraphicsView):
 
 
 # ---------------------------------------------------------------- 面板
+class GraphLayoutCommand(QUndoCommand):
+    """节点图自动布局的可撤销步骤：只改会话内坐标，不写 TMX 文档。
+
+    布局位置存在 dock 的 ``_pos_cache`` / ``_manual_pos``（保存时才写进
+    rwmap_node_pos），所以这条命令不走 ObjectCommand，也不能靠 refresh
+    从文档恢复；撤销必须显式把坐标和手摆标记一起还回去。
+    """
+
+    def __init__(self, dock, before: dict, after: dict, text: str):
+        super().__init__(text)
+        self.dock = dock
+        self.before = before
+        self.after = after
+
+    def undo(self):
+        self.dock._apply_layout_snapshot(self.before)
+
+    def redo(self):
+        self.dock._apply_layout_snapshot(self.after)
+
+
 class TriggerGraphDock(QDockWidget):
     """触发器节点图，默认隐藏；从「设置」打开时是浮动独立窗口。
 
@@ -1551,6 +1827,7 @@ class TriggerGraphDock(QDockWidget):
     """
 
     objectSelected = Signal(object)          # 单击节点 → 高亮地图上的对象
+    objectsSelected = Signal(object)         # 单击整合体 → 高亮它代表的全部对象
     objectActivateRequested = Signal(object)  # 双击节点 → 地图定位
 
     def __init__(self, parent=None):
@@ -1633,7 +1910,11 @@ class TriggerGraphDock(QDockWidget):
             QPushButton:hover{{background:rgba(36, 36, 36, 200);border-color:{INK};}}
             QComboBox,QLineEdit{{background:{THEME['input']};color:{THEME['text']};
                         border:1px solid {INK};border-radius:4px;
-                        padding:3px 6px;font-size:11px;}}
+                        padding:3px 6px;}}
+            /* Qt 6.12 Windows 下 QComboBox 用 px 会让 pointSize() 变成 -1，
+               点开下拉时 delegate 调 setPointSize(-1) 就喷 QFont 警告。 */
+            QComboBox{{font-size:8pt;}}
+            QLineEdit{{font-size:11px;}}
             QComboBox::drop-down{{border:0;}}
             QLabel{{color:{THEME['muted']};font-size:11px;}}
             QSplitter::handle{{background:{THEME['node']};}}
@@ -1697,8 +1978,9 @@ class TriggerGraphDock(QDockWidget):
             "节点 = 对象层里的全部对象（矩形 / 点 / 线 / 文字…，顶部可切换只看某一对象层）"
             " · 新增对象请在地图画布上操作 · 右侧属性可直接编辑（走撤销栈）"
             " · 拖空白平移 / 滚轮缩放 / 双击节点定位到地图"
-            " · 从黄点（端口）拖到另一个节点即可连出「激活」线"
-            " · 右侧连线列表里点叉删除连线，右键连线行可改线型")
+            " · 从黄点（端口）拖到另一个节点即可连出「激活」线；也可右键节点→「触发 → 选目标」"
+            " · 波次节点右键「在其后插入一波」续链，连到播报/奖励节点做关联"
+            " · 右键连线直接删除/改线型，右侧连线列表也可点叉删除")
         self.banner.setWordWrap(True)
         self.banner.setStyleSheet(
             f"QLabel{{background:{INK};color:{TEXT_DIM};border:1px solid {ASH};"
@@ -2345,28 +2627,12 @@ class TriggerGraphDock(QDockWidget):
         if self._detail_uid is not None or self._detail_oid is not None:
             self._rebind_inspector(self._detail_uid, self._detail_oid)
 
-    def _auto_positions(self, only=None):
-        """按连线做拓扑分层；同层过多时自动网格铺开，避免挤成一条竖线。
+    def _topo_layout(self, keys, x0: float, y0: float):
+        """把 ``keys`` 按连线拓扑分层铺开，左上角落在 ``(x0, y0)``。
 
-        ``only`` 不为 None 时只给这些 key 分配位置，其余节点坐标一律保持不变
-        （编辑文档后新增的对象用，避免打乱用户已经摆好的整张图）。
+        跨组连线不在 keys 里会被自然忽略，所以每组都能独立从自己的
+        (0, 0) 起排，不会把别的组的位置撑进来。
         """
-        keys = list(self.data.nodes)
-        if not keys:
-            return
-        if only is not None:
-            targets = [k for k in keys if k in only]
-            if not targets:
-                return
-            existing = [n for k, n in self.data.nodes.items() if k not in only]
-            x_base = max((n.x + NODE_W for n in existing), default=0.0) + 90.0
-            y_base = min((n.y for n in existing), default=60.0)
-            for i, key in enumerate(targets):
-                col, row = divmod(i, 15)
-                n = self.data.nodes[key]
-                n.x = x_base + col * (NODE_W + 48)
-                n.y = y_base + row * (NODE_H + 30)
-            return
         adj = {k: [] for k in keys}
         indeg = {k: 0 for k in keys}
         for e in self.data.edges:
@@ -2392,31 +2658,108 @@ class TriggerGraphDock(QDockWidget):
         rows = 15
         col_gap = NODE_W + 48
         row_gap = NODE_H + 30
-        x_base = 60.0
+        x_base = x0
         for group in layers:
             cols = max(1, math.ceil(len(group) / rows))
             for i, key in enumerate(group):
                 col, row = divmod(i, rows)
                 self.data.nodes[key].x = x_base + col * col_gap
-                self.data.nodes[key].y = 60.0 + row * row_gap
+                self.data.nodes[key].y = y0 + row * row_gap
             x_base += cols * col_gap + 90
 
-    def auto_layout(self):
-        self._manual_pos.clear()
-        self._auto_positions()
-        # 主动「自动布局」的结果也要写进位置缓存，否则下一次 refresh 会把
-        # 节点恢复回整理之前的坐标，看起来像按钮没生效。
-        for key, node in self.data.nodes.items():
-            self._pos_cache[key] = QPointF(node.x, node.y)
+    def _auto_positions(self, only=None, keys=None, origin=(60.0, 60.0)):
+        """按连线做拓扑分层；同层过多时自动网格铺开，避免挤成一条竖线。
+
+        ``only`` 不为 None 时只给这些 key 分配位置，其余节点坐标一律保持不变
+        （编辑文档后新增的对象用，避免打乱用户已经摆好的整张图）。
+        ``keys`` 不为 None 时只对这一批节点做完整拓扑布局（自动布局按钮用），
+        ``origin`` 是布局左上角；其余节点坐标完全不动。
+        """
+        all_keys = list(self.data.nodes)
+        if not all_keys:
+            return
+        if keys is not None:
+            targets = [k for k in keys if k in self.data.nodes]
+            if targets:
+                self._topo_layout(targets, origin[0], origin[1])
+            return
+        if only is not None:
+            targets = [k for k in all_keys if k in only]
+            if not targets:
+                return
+            existing = [n for k, n in self.data.nodes.items() if k not in only]
+            x_base = max((n.x + NODE_W for n in existing), default=0.0) + 90.0
+            y_base = min((n.y for n in existing), default=60.0)
+            for i, key in enumerate(targets):
+                col, row = divmod(i, 15)
+                n = self.data.nodes[key]
+                n.x = x_base + col * (NODE_W + 48)
+                n.y = y_base + row * (NODE_H + 30)
+            return
+        self._topo_layout(all_keys, origin[0], origin[1])
+
+    def _layout_snapshot(self, keys) -> dict:
+        """记下这批节点当前的布局位置（含是否手摆过），供撤销恢复。"""
+        snap = {}
+        for key in keys:
+            node = self.data.nodes.get(key)
+            if node is None:
+                continue
+            manual = self._manual_pos.get(key)
+            snap[key] = (node.x, node.y,
+                         None if manual is None else (manual.x(), manual.y()))
+        return snap
+
+    def _apply_layout_snapshot(self, snap: dict):
+        """把一批节点的布局位置恢复成快照；只动会话内坐标，不写文档。"""
         self._loading = True
-        for key, node in self.data.nodes.items():
-            item = self.node_items.get(key)
-            if item is not None:
-                item.setPos(node.x, node.y)
-        self._loading = False
+        self.scene.blockSignals(True)
+        try:
+            for key, (x, y, manual) in snap.items():
+                node = self.data.nodes.get(key)
+                if node is None:
+                    continue
+                node.x, node.y = x, y
+                self._pos_cache[key] = QPointF(x, y)
+                if manual is None:
+                    self._manual_pos.pop(key, None)
+                else:
+                    self._manual_pos[key] = QPointF(manual[0], manual[1])
+                item = self.node_items.get(key)
+                if item is not None:
+                    item.setPos(x, y)
+        finally:
+            self.scene.blockSignals(False)
+            self._loading = False
         for edge in self.edge_items:
             edge.rebuild()
         self.fit_view()
+
+    def auto_layout(self):
+        """只对当前分组页做布局：组内左上角为 (0, 0)，别的组不碰。
+
+        「选择已有组」页就是**未分组**这一组（不是全部），所以也只排
+        group 为空的节点。布局是一步可撤销操作（Ctrl+Z 恢复原位）。
+        """
+        page = self._group_page
+        if page == "ALL":            # 仅外部脚本显式使用，界面里没有这一档
+            targets = list(self.data.nodes)
+        else:
+            targets = [k for k, n in self.data.nodes.items()
+                       if n.group == page]
+        if not targets:                # 空组：不动视图，免得跳到别的组内容
+            return
+        before = self._layout_snapshot(targets)
+        self._auto_positions(keys=targets, origin=(0.0, 0.0))
+        # 布局后的位置：手动摆位标记清掉，坐标写进会话缓存。
+        after = {k: (self.data.nodes[k].x, self.data.nodes[k].y, None)
+                 for k in targets}
+        cmd = GraphLayoutCommand(self, before, after,
+                                 f"自动布局（{page or '未分组'}）")
+        if self.undo_stack is not None:
+            self.undo_stack.push(cmd)   # push 会调 redo，把结果同步到 item
+        else:
+            cmd.redo()
 
     def fit_view(self):
         # 用数据层所有 active 节点算包围盒（而不是仅 live 的视口内节点），
@@ -2488,32 +2831,12 @@ class TriggerGraphDock(QDockWidget):
             self._selected_keys = set()
             self._clear_detail()
             return
-        # 选中一个节点时，自动把同组（同一 rwmap_group 名）的节点一起选中
-        groups = {i.node.group for i in items if i.node.group}
-        if groups:
-            extras = [it for it in self.node_items.values()
-                      if it.node.group in groups and it not in items]
-            if extras:
-                self._loading = True
-                self.scene.blockSignals(True)
-                for it in extras:
-                    it.setSelected(True)
-                self.scene.blockSignals(False)
-                self._loading = False
-                items = [i for i in self.scene.selectedItems()
-                         if isinstance(i, NodeItem)]
-        # 数据层选中态：跨虚拟化存活（节点滚出视口被回收后，滚回仍保持选中高亮）。
-        # 同组自动扩容也要覆盖「当前页里但没被渲染」的节点：选中态属于数据，
-        # 渲染与否只由视口决定。只扩容 live 节点的话，缩放后同组未渲染对象
-        # 就会掉出选中集，右键批量移动 / 删除也就漏掉它们。
-        keys = {i.node.key for i in items}
-        if groups:
-            active = self._active_keys()
-            keys.update(k for k, n in self.data.nodes.items()
-                        if k in active and n.group in groups)
-        self._selected_keys = keys
+        # 节点图里只认用户真正点中 / 框中的节点：同组对象不连带选中。
+        # 「选一个就选整组」只发生在地图画布（_select_object_with_group）；
+        # 节点图里连带会让批量分组 / 删除误伤同组其它节点。
+        self._selected_keys = {i.node.key for i in items}
         self._show_detail(items[0].node)
-        self.objectSelected.emit(items[0].node.obj)
+        self._emit_selection_for_node(items[0].node)
 
     # ---------------- 分组（编辑器私有属性 rwmap_group） ----------------
     def _color_for_group(self, name: str) -> QColor:
@@ -2649,11 +2972,253 @@ class TriggerGraphDock(QDockWidget):
                 lambda _checked=False, g=name: self._move_selected_to_group(g))
         act_new = menu.addAction("加入新建组…")
         act_new.triggered.connect(self._new_group_dialog)
+
+        # 整合体：把选中的同配置对象折叠成一个节点，改一处同步改所有。
+        if count >= 2:
+            sigs = {_merge_signature(n.obj) for n in nodes}
+            if len(sigs) == 1:
+                act_merge = menu.addAction(
+                    f"整合为 1 个（{count} 个同配置对象）")
+                act_merge.setToolTip(
+                    "合并后在右侧改名字 / 属性 / 连线，会同步到全部成员；"
+                    "原有连线会全部断开，Ctrl+Z 可撤销")
+                act_merge.triggered.connect(self._merge_selected_nodes)
+            else:
+                act_no = menu.addAction("整合（所选对象配置不同）")
+                act_no.setEnabled(False)
+                act_no.setToolTip("只支持把类型 / 公开属性完全相同的触发器整合到一起")
+        if count == 1 and int(getattr(nodes[0], "merge_count", 0) or 0) > 1:
+            act_split = menu.addAction(
+                f"解散整合（恢复 {nodes[0].merge_count} 个节点）")
+            act_split.triggered.connect(
+                lambda _checked=False, n=nodes[0]: self._dissolve_merge(n))
+
+        # 波次链：右键某一波 →「在其后插入一波」，自动生成下一波节点并接进链。
+        # 只针对单选波次节点；多选时不显示，避免不知插到哪一波后面。
+        if count == 1 and is_wave_node(nodes[0].obj):
+            src_wave = nodes[0]
+            act_wave = menu.addAction("在其后插入一波")
+            act_wave.triggered.connect(
+                lambda _checked=False, s=src_wave: self._insert_wave_after(s))
+
+        # 「触发 →」：从选中节点连一条「激活」线到指定目标。比拖端口更好找，
+        # 也是用户手绘图里「右键可添加」的诉求。单选时源明确；多选时用第一个
+        # 选中节点作源（避免一次建出一堆线），并在标题里说明。
+        if nodes:
+            src = nodes[0]
+            targets = [n for n in self.data.nodes.values()
+                       if n.key != src.key and n.key not in self._selected_keys]
+            if targets:
+                trig = menu.addMenu("触发 → 选目标")
+                trig.setTitle(f"触发 →（源：{src.obj.label}）")
+                for tgt in sorted(targets, key=lambda n: n.obj.label or n.tid):
+                    act = trig.addAction(tgt.obj.label or tgt.obj.name or tgt.tid)
+                    act.triggered.connect(
+                        lambda _checked=False, s=src, d=tgt:
+                        self.create_link(s, d))
+
         menu.addSeparator()
         act_del = menu.addAction(
             f"删除（{count} 个对象）" if count > 1 else "删除")
         act_del.triggered.connect(self._delete_selected_objects)
         return menu
+
+    # ---------------- 整合体：多个同配置对象折叠成一个节点 ----------------
+    def _object_layers(self):
+        if self.doc is None:
+            return []
+        return [l for l in self.doc.layers if isinstance(l, ObjectLayer)]
+
+    @staticmethod
+    def _merge_members(node: GraphNode) -> list:
+        """节点代表的全部真实对象（代表节点排第一）。"""
+        members = list(getattr(node, "merge_members", ()) or ())
+        return members or ([node.obj] if node is not None else [])
+
+    @staticmethod
+    def _link_ref_keys(node: GraphNode, prop: str) -> list[str]:
+        """私有 key 类连线写到目标节点时要落的引用列表。
+
+        「波次关联」(waveGen / waveTable) 用节点唯一 key 作引用。目标是整合体
+        时，必须给名下每个成员各写一条：整合期间这些 key 全部折叠到代表节点
+        上，只显示一条线；解散整合后自然展开成 N 条独立连线。
+        """
+        keys = [str(k) for k in (getattr(node, "merge_member_keys", ()) or ()) if k]
+        if keys and prop in (WAVE_LINK_PROPERTY, WAVE_TABLE_NEXT_PROPERTY):
+            return keys
+        return [str(node.key)]
+
+    def _merge_selected_nodes(self):
+        """把当前选中批整合成一个节点，并断开这批对象的所有连线。
+
+        整批（含被整合组展开出的成员）只压一条撤销命令。成员关系写在私有
+        属性里，跟着 rwmap_layout 存进地图根属性，游戏看不到。
+        """
+        nodes = self._selected_graph_nodes()
+        if len(nodes) < 2:
+            self.status.setText("至少选中两个触发器才能整合")
+            return
+        chosen: dict[int, object] = {}
+        for node in nodes:
+            for obj in self._merge_members(node):
+                chosen[id(obj)] = obj
+        objs = list(chosen.values())
+        if len(objs) < 2:
+            self.status.setText("至少选中两个触发器才能整合")
+            return
+        primary = self._merge_members(nodes[0])[0]
+        gid = f"m{time.time_ns()}"
+        ref_names: set[str] = set()
+        for obj in objs:
+            ref_names |= _obj_ref_names(obj)
+        # 私有「波次关联」引用的是节点 key，也要一起断开，否则重新整合后
+        # 会留下指向已折叠成员的幽灵连线。
+        for node in nodes:
+            ref_names.add(str(node.key).lower())
+            ref_names.update(str(k).lower() for k in
+                             (getattr(node, "merge_member_keys", ()) or ()))
+
+        before = capture(self._object_layers())
+        # 打组标记 + 断掉这批对象自己身上的所有连线（包括私有波次关联）
+        for obj in objs:
+            props = obj.properties
+            props.set(MERGE_GROUP_PROPERTY, gid, "string")
+            if obj is primary:
+                props.set(MERGE_PRIMARY_PROPERTY, "1", "string")
+            else:
+                _drop_prop(props, MERGE_PRIMARY_PROPERTY)
+            for key in LINK_PROPS:
+                _drop_prop(props, key)
+        # 其它对象指向这些成员的线也一并断开，节点图里不再留"幽灵连线"
+        for layer in self._object_layers():
+            for other in layer.objects:
+                if id(other) in chosen:
+                    continue
+                for key in LINK_PROPS:
+                    raw = other.properties.get(key)
+                    if not raw:
+                        continue
+                    kept = [tok for tok in _split_refs(raw)
+                            if _ref_name(tok).lower() not in ref_names]
+                    if len(kept) == len(_split_refs(str(raw))):
+                        continue
+                    if kept:
+                        other.properties.set(key, ", ".join(kept), "string")
+                    else:
+                        _drop_prop(other.properties, key)
+        self._push_object_edit(
+            before, f"整合 {len(objs)} 个触发器为 1 个",
+            f"已整合 {len(objs)} 个对象，原有连线全部断开；改一处同步改全部"
+            f"（Ctrl+Z 可撤销）")
+        # 刷新后按组 id 找回代表节点并选中（命令会克隆对象，不能沿用旧引用）
+        for node in self.data.nodes.values():
+            if node.merge_group == gid:
+                self.select_objects([node.obj])
+                self._emit_selection_for_node(node)
+                break
+
+    def _dissolve_merge(self, node: GraphNode):
+        """解散整合体：成员对象全部保留，只是恢复成各自独立的节点。"""
+        members = self._merge_members(node)
+        if len(members) < 2:
+            return
+        uids = {object_uid(o) for o in members}
+        before = capture(self._object_layers())
+        for obj in members:
+            _drop_prop(obj.properties, MERGE_GROUP_PROPERTY)
+            _drop_prop(obj.properties, MERGE_PRIMARY_PROPERTY)
+        self._push_object_edit(
+            before, f"解散整合（{len(members)} 个对象）",
+            f"已恢复 {len(members)} 个独立节点（Ctrl+Z 可撤销）")
+        targets = [n for n in self.data.nodes.values()
+                   if object_uid(n.obj) in uids]
+        self.select_objects([n.obj for n in targets])
+
+    def _emit_selection_for_node(self, node: GraphNode):
+        """节点选中 → 通知地图画布高亮：整合体高亮全部成员，普通节点高亮自己。"""
+        members = self._merge_members(node)
+        if len(members) > 1:
+            self.objectsSelected.emit(list(members))
+        else:
+            self.objectSelected.emit(node.obj)
+
+    def _insert_wave_after(self, node: GraphNode):
+        """在指定波次节点之后插入新的一波，并接进波次链。
+
+        - 名字自动生成「第N波」（顶上显示的标题），同时同步到私有波次名属性；
+        - 旧的后继接到新波次之后（src → new → old_next），保持链连贯；
+        - 新节点放在 src 右侧一个节点间距，visible=false（地图画布不显示）；
+        - 整批只占一条撤销记录，插入后选中新节点方便马上填时间 / 刷兵。
+        """
+        if self.doc is None or node is None:
+            self.status.setText("没有可用的地图文档，无法插入波次")
+            return
+        layer = self._layer_of(node)
+        if layer is None:
+            self.status.setText("找不到波次节点所属的对象层")
+            return
+        from ..document.map_object import MapObject
+
+        before = capture([layer])
+        # 从被点的波次沿链走到末尾，把新波次追加到链尾。这样在任意一波上
+        # 反复右键「插入」都会依次得到 第一波 → 第二波 → 第三波，不会插到
+        # 中间把编号顺序打乱。
+        tail_obj = node.obj
+        by_name = {str(o.name or "").strip(): o for o in layer.objects}
+        seen: set[int] = set()
+        while id(tail_obj) not in seen:
+            seen.add(id(tail_obj))
+            nxt = str(tail_obj.properties.get(WAVE_NEXT_PROPERTY) or "").strip()
+            target = by_name.get(nxt)
+            if target is None or target is tail_obj:
+                break
+            tail_obj = target
+        name = next_wave_name(self.doc)
+        old_next = str(tail_obj.properties.get(WAVE_NEXT_PROPERTY) or "").strip()
+        # 新对象 id 取全图最大 + 1，避免和现有对象撞号。
+        new_id = max((o.object_id for l in self.doc.layers
+                      if hasattr(l, "objects") for o in l.objects), default=0) + 1
+        new_obj = MapObject(
+            object_id=new_id, name=name, type_=WAVE_GEN_TYPE,
+            shape="point", x=0, y=0, visible=False,
+        )
+        props = new_obj.properties
+        props.set(WAVE_MARK_PROPERTY, "1", "string")
+        props.set(WAVE_NAME_PROPERTY, name, "string")
+        props.set(WAVE_TIME_PROPERTY, "", "string")
+        props.set(WAVE_UNITS_PROPERTY, "", "string")
+        if old_next:
+            props.set(WAVE_NEXT_PROPERTY, old_next, "string")
+        # 位置写进私有属性（在快照之后、提交之前，纳入撤销）；保存时还会被
+        # write_positions_to_properties 用真实场景坐标重写，这里只是兜底。
+        tail_x = node.x + NODE_W + 45.0
+        tail_y = node.y
+        props.set(EDITOR_NODE_POS_PROPERTY,
+                  f"{int(tail_x)},{int(tail_y)}", "string")
+        # 链尾改指向新波次（名字引用）；置前快照已包含该层。
+        tail_obj.properties.set(WAVE_NEXT_PROPERTY, name, "string")
+        layer.objects.append(new_obj)
+        layer.dirty = True
+        self.doc.dirty = True
+
+        pushed = self._push_object_edit(
+            before, f"插入波次 {name}",
+            f"已在「{tail_obj.name or tail_obj.label}」后插入「{name}」（Ctrl+Z 可撤销）")
+        # 摆在 src 右侧，紧跟当前波次；手动位置优先于自动布局。
+        new_key = f"{layer.name}::{new_id}"
+        self._manual_pos[new_key] = QPointF(tail_x, tail_y)
+        self.refresh(fit=False)
+        # push_object_edit 会用快照克隆整层对象，局部 new_obj 已失效；按
+        # object_id + 名字在数据层重新找到真正的节点再选中。
+        fresh = next((n for n in self.data.nodes.values()
+                      if n.obj.object_id == new_id and n.obj.name == name), None)
+        if fresh is not None:
+            try:
+                self.select_objects([fresh.obj])
+            except Exception:  # noqa: BLE001 - 选中失败不影响已插入的数据
+                pass
+        if not pushed:
+            self.status.setText(f"已插入「{name}」")
 
     @staticmethod
     def _clear_group_property(node):
@@ -2693,13 +3258,18 @@ class TriggerGraphDock(QDockWidget):
         targets: dict[int, set] = {}
         layers = []
         for n in nodes:
-            layer = self._layer_of(n)
-            if layer is None:
-                continue
-            if id(layer) not in targets:
-                targets[id(layer)] = set()
-                layers.append(layer)
-            targets[id(layer)].add(object_uid(n.obj))
+            # 整合体删的是它代表的全部真实对象，不能只删代表留下一堆
+            # 没有入口的隐藏成员。
+            members = self._merge_members(n)
+            for obj in members:
+                layer = next((l for l in self._object_layers()
+                              if any(o is obj for o in l.objects)), None)
+                if layer is None:
+                    continue
+                if id(layer) not in targets:
+                    targets[id(layer)] = set()
+                    layers.append(layer)
+                targets[id(layer)].add(object_uid(obj))
         if not layers:
             self.status.setText("找不到这些对象所属的对象层，未删除")
             return
@@ -2772,29 +3342,113 @@ class TriggerGraphDock(QDockWidget):
         """
         if src is dst:
             return
-        raw = src.obj.properties.get("alsoActivate") or ""
-        tid = dst.obj.properties.get("id")
-        if tid and tid in _parse_ids(raw):
-            self.status.setText(f"连线已存在：{src.obj.label} 激活 {dst.obj.label}")
+
+        # 官方波次表节点：用私有连线属性 rwmap_wave_table_next，可连到任意
+        # 触发器节点（播报 / 奖励等）；同样用目标 name 作引用，游戏零干扰。
+        # 必须放在 waveGen 分支之前判断（两者互斥，不会同时成立）。
+        src_is_table = is_wave_table_node(src.obj)
+        dst_is_table = is_wave_table_node(dst.obj)
+        if src_is_table or dst_is_table:
+            # 只允许从波次表节点连出（forward），不允许别的节点连进来当源。
+            if not src_is_table:
+                self.status.setText("请从官方波次表节点拖出连线（它主动关联其它节点）")
+                return
+            before = capture(self._object_layers())
+            # 用节点唯一 key 作引用：重名对象（attack_point）靠 name 会互相
+            # 覆盖，只能连一个且连错目标。key 由 collect_graph.resolve 按
+            # by_key 解析，旧的 name/id 引用仍兼容。
+            refs = self._link_ref_keys(dst, WAVE_TABLE_NEXT_PROPERTY)
+            cur_raw = src.obj.properties.get(WAVE_TABLE_NEXT_PROPERTY) or ""
+            ids = _parse_ids(cur_raw)
+            if all(r in ids for r in refs):
+                self.status.setText(
+                    f"连线已存在：{_display_name(src)} → {_display_name(dst)}")
+                return
+            for ref in refs:
+                if ref not in ids:
+                    ids.append(ref)
+            self._write_ref_all(src, WAVE_TABLE_NEXT_PROPERTY, ", ".join(ids))
+            self._push_object_edit(
+                before, f"波次表关联 {_display_name(src)} → {_display_name(dst)}",
+                f"已关联：{_display_name(src)} → {_display_name(dst)}（Ctrl+Z 可撤销）")
             return
-        before = capture([self._layer_of(src), self._layer_of(dst)])
+
+        # 波次生成器：用自己的私有连线属性 rwmap_wave_next，只连一条「下一波」，
+        # 用目标 name 作引用（重开后靠 name 解析，不碰游戏的 id 体系）。
+        src_is_wave = is_wave_node(src.obj)
+        dst_is_wave = is_wave_node(dst.obj)
+        if src_is_wave or dst_is_wave:
+            # 波 → 波：下一波（链）；波 → 普通触发器：私有「波次关联」，
+            # 保存时由 wave_gen 编译成游戏里的定时激活触发器。
+            if src_is_wave and dst_is_wave:
+                prop, single = WAVE_NEXT_PROPERTY, True
+            elif src_is_wave and not dst_is_wave:
+                prop, single = WAVE_LINK_PROPERTY, False
+            else:
+                self.status.setText("请从波次节点拖出连线（下一波，或关联播报/奖励触发器）")
+                return
+            before = capture(self._object_layers())
+            # 「下一波」用目标 name（节点名一般唯一，且 wave_gen 编译按名字
+            # 解析）；「波次关联」必须改用节点唯一 key —— attack_point 全叫
+            # 同一个名字，用 name 会互相判重复、且全部解析到第一个点。
+            cur_raw = src.obj.properties.get(prop) or ""
+            if single:
+                # 一波只允许一个下一波：直接替换，避免分叉（校验层也会拦截）。
+                ref = str(dst.obj.name or dst.obj.object_id).strip()
+                self._write_ref_all(src, prop, ref)
+            else:
+                # 目标是整合体时给每个成员各写一条引用。整合期间节点图里折叠
+                # 成一条线；解散整合后自动展开成 N 条独立连线。
+                refs = self._link_ref_keys(dst, prop)
+                ids = _parse_ids(cur_raw)
+                if all(r in ids for r in refs):
+                    self.status.setText(
+                        f"连线已存在：{_display_name(src)} → {_display_name(dst)}")
+                    return
+                for ref in refs:
+                    if ref not in ids:
+                        ids.append(ref)
+                self._write_ref_all(src, prop, ", ".join(ids))
+            self._push_object_edit(
+                before, f"设置波次连线 {_display_name(src)} → {_display_name(dst)}",
+                f"已连接：{_display_name(src)} → {_display_name(dst)}（Ctrl+Z 可撤销）")
+            return
+
+        raw = src.obj.properties.get("alsoActivate") or ""
+        dst_objs = self._merge_members(dst)
+        first_tid = dst_objs[0].properties.get("id") if dst_objs else None
+        if first_tid:
+            existing_ids = set(_parse_ids(raw))
+            if all(o.properties.get("id") in existing_ids for o in dst_objs
+                   if o.properties.get("id")):
+                self.status.setText(
+                    f"连线已存在：{_display_name(src)} 激活 {_display_name(dst)}")
+                return
+        before = capture(self._object_layers())
         # 保证两端都有可被引用的自定义 id。铁锈地图的 Tiled object_id 大量重复，
         # 不能直接拿它当 id：否则几十个触发器会拿到同一个 id，游戏内连线指向错乱。
+        # 整合体要给它名下每个对象都分配 id，不能只给代表节点。
         used = used_trigger_ids(self.doc)
         for node in (src, dst):
-            if not node.obj.properties.get("id"):
-                node.obj.properties.set("id", allocate_trigger_id(node.obj, used))
-        tid = dst.obj.properties.get("id")
-        if not tid:
+            for obj in self._merge_members(node):
+                if not obj.properties.get("id"):
+                    obj.properties.set("id", allocate_trigger_id(obj, used))
+        tids = [o.properties.get("id") for o in dst_objs
+                if o.properties.get("id")]
+        if not tids:
             self.status.setText("目标节点没有可用 id，无法建立连线")
             return
-        raw = src.obj.properties.get("alsoActivate") or ""
-        ids = _parse_ids(raw)
-        if tid in ids:
-            self.status.setText(f"连线已存在：{src.obj.label} 激活 {dst.obj.label}")
+        ids = _parse_ids(src.obj.properties.get("alsoActivate") or "")
+        added = False
+        for tid in tids:
+            if tid not in ids:
+                ids.append(tid)
+                added = True
+        if not added:
+            self.status.setText(
+                f"连线已存在：{_display_name(src)} 激活 {_display_name(dst)}")
             return
-        ids.append(tid)
-        src.obj.properties.set("alsoActivate", ", ".join(ids), "string")
+        self._write_ref_all(src, "alsoActivate", ", ".join(ids))
         self._push_object_edit(
             before, f"建立连线 {src.obj.label} → {dst.obj.label}",
             f"已建立连线：{src.obj.label} 激活 {dst.obj.label}（Ctrl+Z 可撤销）")
@@ -2825,13 +3479,22 @@ class TriggerGraphDock(QDockWidget):
     @staticmethod
     def _write_ref(node: GraphNode, prop: str, value: str):
         """写 / 删一个引用属性；空值必须整键删掉，别留一个空 <property>。"""
-        bag = node.obj.properties
+        TriggerGraphDock._write_ref_obj(node.obj, prop, value)
+
+    @staticmethod
+    def _write_ref_obj(obj, prop: str, value: str):
+        bag = obj.properties
         if value.strip():
             bag.set(prop, value, "string")
         else:
             bag.values.pop(prop, None)
             bag.types.pop(prop, None)
             bag.text_props.discard(prop)
+
+    def _write_ref_all(self, node: GraphNode, prop: str, value: str):
+        """整合体连线：同一个引用属性同步写给全部成员。"""
+        for obj in self._merge_members(node):
+            self._write_ref_obj(obj, prop, value)
 
     def delete_edge(self, e: GraphEdge):
         """点线中点的叉：把这条引用从持有它的对象属性里删掉。
@@ -2846,13 +3509,21 @@ class TriggerGraphDock(QDockWidget):
         other = self.data.nodes.get(e.dst if forward else e.src)
         if owner is None or other is None:
             return
-        raw = owner.obj.properties.get(e.kind) or ""
-        new_raw, removed = _remove_ref_token(raw, other)
+        other_names = _node_ref_names(other)
+        before = capture(self._object_layers())
+        removed = False
+        # 整合体：对端代表的每个真实对象都要从连线属性里摘掉
+        for owner_obj in self._merge_members(owner):
+            tokens = _split_refs(owner_obj.properties.get(e.kind) or "")
+            kept = [tok for tok in tokens
+                    if _ref_name(tok).lower() not in other_names]
+            if len(kept) == len(tokens):
+                continue
+            removed = True
+            self._write_ref_obj(owner_obj, e.kind, ", ".join(kept))
         if not removed:
             self.status.setText("这条连线没有可删除的引用（文档可能已被外部改动）")
             return
-        before = capture([self._layer_of(owner)])
-        self._write_ref(owner, e.kind, new_raw)
         self._push_object_edit(
             before, f"删除连线 {owner.obj.label} → {other.obj.label}",
             f"已删除连线：{owner.obj.label} → {other.obj.label}"
@@ -2875,26 +3546,39 @@ class TriggerGraphDock(QDockWidget):
         new_other = self.data.nodes.get(e.dst if new_forward else e.src)
         if None in (old_owner, old_other, new_owner, new_other):
             return
-        raw = old_owner.obj.properties.get(e.kind) or ""
-        new_raw, removed = _remove_ref_token(raw, old_other)
+        old_names = _node_ref_names(old_other)
+        before = capture(self._object_layers())
+        removed = False
+        for owner_obj in self._merge_members(old_owner):
+            tokens = _split_refs(owner_obj.properties.get(e.kind) or "")
+            kept = [tok for tok in tokens
+                    if _ref_name(tok).lower() not in old_names]
+            if len(kept) == len(tokens):
+                continue
+            removed = True
+            self._write_ref_obj(owner_obj, e.kind, ", ".join(kept))
         if not removed:
             self.status.setText("改线型失败：找不到旧连线对应的引用")
             return
-        before = capture([self._layer_of(n) for n in
-                          (old_owner, old_other, new_owner, new_other)])
-        self._write_ref(old_owner, e.kind, new_raw)
         # 铁锈战争按自定义 id 引用触发器；两端都得先有全图唯一的 id
         used = used_trigger_ids(self.doc)
         for node in (new_owner, new_other):
-            if not node.obj.properties.get("id"):
-                node.obj.properties.set(
-                    "id", allocate_trigger_id(node.obj, used), "string")
-        ref = str(new_other.obj.properties.get("id")
-                  or new_other.obj.object_id)
-        cur = new_owner.obj.properties.get(new_kind) or ""
-        if ref not in _parse_ids(cur):
-            self._write_ref(new_owner, new_kind,
-                            ", ".join(_split_refs(cur) + [ref]))
+            for obj in self._merge_members(node):
+                if not obj.properties.get("id"):
+                    obj.properties.set(
+                        "id", allocate_trigger_id(obj, used), "string")
+        refs = [o.properties.get("id") for o in self._merge_members(new_other)
+                if o.properties.get("id")]
+        if not refs:
+            refs = [str(new_other.obj.object_id)]
+        for owner_obj in self._merge_members(new_owner):
+            tokens = _split_refs(owner_obj.properties.get(new_kind) or "")
+            known = set(_parse_ids(" ".join(tokens)))
+            for ref in refs:
+                if ref not in known:
+                    tokens.append(ref)
+                    known.add(ref)
+            self._write_ref_obj(owner_obj, new_kind, ", ".join(tokens))
         self._push_object_edit(
             before, f"改线型 {EDGE_SPECS[new_kind][0]}",
             f"线型已改为「{EDGE_SPECS[new_kind][0]}」（{new_kind}，Ctrl+Z 可撤销）")
@@ -2960,11 +3644,11 @@ class TriggerGraphDock(QDockWidget):
             if e.src == node.key:
                 other = self.data.nodes.get(e.dst)
                 out.append(("out", label,
-                            other.obj.label if other else "?", color, e))
+                            _display_name(other) if other else "?", color, e))
             elif e.dst == node.key:
                 other = self.data.nodes.get(e.src)
                 out.append(("in", label,
-                            other.obj.label if other else "?", color, e))
+                            _display_name(other) if other else "?", color, e))
         return out
 
     def _show_edge_menu(self, edge, global_pos):
@@ -2988,6 +3672,7 @@ class TriggerGraphDock(QDockWidget):
         self._detail_oid = getattr(node.obj, "object_id", None)
         self.inspector.set_context(self.doc, layer, self.undo_stack,
                                    self._after_object_change)
+        self.inspector.set_merge_targets(getattr(node, "merge_members", ()))
         self.inspector.show_node(node, self._edges_for(node), layer)
 
     def _activate_detail(self, node: GraphNode):

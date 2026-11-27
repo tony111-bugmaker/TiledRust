@@ -50,6 +50,11 @@ _MAX_CELLS_PER_OBJECT = 64   # 超大对象放进 overflow，避免一张图占�
 # 缩到 0.5 倍以下文字不足 8px，画出来只是一团糊且 drawText 很贵。
 _LABEL_MIN_SCALE = 0.5
 
+# 极低缩放下对象本身可能不足 1 屏幕像素（20 场景单位格在 5% 时 = 1px），
+# drawRect 四条边会挤成一个点 / 抗锯齿稀释成 L 形。强制把绘制矩形撑到
+# 至少 4×4 屏幕像素，保证四条边始终分辨得出；只影响绘制，不改对象 bounds。
+_MIN_EDGE_SCREEN_PX = 4.0
+
 # 大量对象时的整层缓存：对象增删不频繁、逐帧全量重绘却很贵。
 # 小场景 (<200) 保持逐对象路径，避免缓存维护成本盖过收益。
 _CACHE_MIN_OBJECTS = 200
@@ -98,6 +103,24 @@ def object_rect(obj, tile_w: int = 20, tile_h: int = 20) -> QRectF:
     return QRectF(x, y, w, h)
 
 
+def min_visible_rect(rect: QRectF, view_scale: float,
+                     min_px: float = _MIN_EDGE_SCREEN_PX) -> QRectF:
+    """极小对象在给定视图缩放下撑到至少 min_px×min_px 屏幕像素（中心不变）。
+
+    用场景单位反算：每屏幕像素 = 1/view_scale 场景单位。只用于绘制，
+    保持中心，不改变命中包围盒 / 空间索引。
+    """
+    if rect.isEmpty() or view_scale <= 0:
+        return rect
+    need = min_px / max(view_scale, 0.02)
+    w, h = rect.width(), rect.height()
+    if w >= need and h >= need:
+        return rect
+    cx, cy = rect.center().x(), rect.center().y()
+    return QRectF(cx - max(w, need) / 2.0, cy - max(h, need) / 2.0,
+                  max(w, need), max(h, need))
+
+
 def _cells_for(rect: QRectF) -> tuple[tuple[int, int], ...]:
     """矩形覆盖的网格桶坐标（含标签 / 箭头留白后传入）。"""
     if rect.isEmpty():
@@ -117,6 +140,18 @@ def _choose_tile_lod(scale: float) -> float:
         if lod <= budget:
             return lod
     return _TILE_LODS[-1]
+
+
+def compensated_line_width(view_scale: float, fallback: float = 1.0) -> int:
+    """屏幕线宽 ≥1px 所需的场景线宽（历史兼容函数）。
+
+    注：边框现已改为缓存只烘焙内容、paint() 每帧以 cosmetic pen 描边，
+    恒 1 设备像素，不再依赖本函数做补偿。保留供旧测试 / 外部调用参考：
+    在需要把线宽烘焙进位图的场景下，场景 line_w × view_scale = 屏幕像素，
+    取整保证 ≥1px（低缩放时 ceil 会让屏幕线宽偏大，正是 cosmetic 方案要消除的）。
+    """
+    effective = view_scale if view_scale and view_scale > 0 else fallback
+    return max(1, int(math.ceil(1.0 / max(effective, 0.02))))
 
 
 @lru_cache(maxsize=256)
@@ -342,22 +377,12 @@ def clear_image_cache() -> None:
 #      QFont 在工作线程新建会碰字体数据库，且测试会改 QApplication 默认字体。
 
 
-def _paint_object_pure(painter, obj, doc, *, is_selected: bool = False,
-                       preview: bool = False, show_label: bool = True,
-                       line_width: int | None = None,
-                       images: dict | None = None, label_font: QFont | None = None,
-                       show_nodes: bool = False):
-    """_paint_object 的纯函数版本；位图/字体可由外部注入。"""
-    rect = object_rect(obj, doc.tile_w, doc.tile_h)
-    if line_width is not None and line_width > 1:
-        base = QColor(255, 200, 60, 190)
-        pen = QPen(base, line_width)
-        painter.setPen(pen)
-    else:
-        painter.setPen(_PEN_PREVIEW if preview else
-                       (_PEN_SELECTED if is_selected else _PEN_NORMAL))
-    painter.setBrush(Qt.NoBrush)
+def _stroke_shape(painter, obj, rect):
+    """只描对象轮廓；笔由调用方设好（缓存=补偿宽，屏幕=cosmetic 恒 1px）。
 
+    从 _paint_object_pure 拆出，供「缓存只烘焙内容、边框每帧在视图层用
+    cosmetic pen 描」使用。调用前需 setBrush(Qt.NoBrush)。
+    """
     shape = obj.shape
     if shape == "ellipse":
         painter.drawEllipse(rect)
@@ -370,10 +395,62 @@ def _paint_object_pure(painter, obj, doc, *, is_selected: bool = False,
         poly = QPolygonF([QPointF(obj.x + px, obj.y + py)
                           for px, py in obj.points])
         if shape == "polygon":
-            painter.setBrush(QBrush(QColor(255, 200, 60, 30)))
             painter.drawPolygon(poly)
-            painter.setBrush(Qt.NoBrush)
         else:
+            painter.drawPolyline(poly)
+    elif shape in ("text", "rect"):
+        painter.drawRect(rect)
+    # tile/image 的「框」就是图片本身，没有独立轮廓线。
+
+
+def _paint_object_pure(painter, obj, doc, *, is_selected: bool = False,
+                       preview: bool = False, show_label: bool = True,
+                       line_width: int | None = None,
+                       images: dict | None = None, label_font: QFont | None = None,
+                       show_nodes: bool = False, view_scale: float | None = None,
+                       no_border: bool = False):
+    """_paint_object 的纯函数版本；位图/字体可由外部注入。
+
+    ``no_border=True`` 时只画内容（填充/图片/文字/标签），不描轮廓——
+    缓存路径用它在位图里烘焙内容，轮廓留给 paint() 每帧以 cosmetic pen
+    描画，从而恒为 1 屏幕像素（与节点图连线一致，不随视图缩放变粗）。
+
+    ``view_scale`` 是视图缩放（缓存路径需显式传入）。极低缩放下用
+    ``min_visible_rect`` 把对象框撑到 4×4 屏幕像素，保证四条边不退化成点。
+    """
+    rect = object_rect(obj, doc.tile_w, doc.tile_h)
+    if view_scale is not None:
+        rect = min_visible_rect(rect, view_scale)
+    if no_border:
+        painter.setPen(Qt.NoPen)
+    elif line_width is not None and line_width > 1:
+        base = QColor(255, 200, 60, 190)
+        pen = QPen(base)
+        pen.setWidthF(float(line_width))
+        painter.setPen(pen)
+    else:
+        painter.setPen(_PEN_PREVIEW if preview else
+                       (_PEN_SELECTED if is_selected else _PEN_NORMAL))
+    painter.setBrush(Qt.NoBrush)
+
+    shape = obj.shape
+    if shape == "ellipse":
+        if not no_border:
+            painter.drawEllipse(rect)
+    elif shape == "point":
+        if not no_border:
+            center = QPointF(obj.x, obj.y)
+            painter.drawEllipse(center, 6.0, 6.0)
+            painter.drawLine(center + QPointF(-10, 0), center + QPointF(10, 0))
+            painter.drawLine(center + QPointF(0, -10), center + QPointF(0, 10))
+    elif shape in ("polygon", "polyline"):
+        poly = QPolygonF([QPointF(obj.x + px, obj.y + py)
+                          for px, py in obj.points])
+        if shape == "polygon":
+            painter.setBrush(QBrush(QColor(255, 200, 60, 30)))
+            painter.drawPolygon(poly)   # no_border 时 pen=NoPen，只填充
+            painter.setBrush(Qt.NoBrush)
+        elif not no_border:
             painter.drawPolyline(poly)
     elif shape in ("tile", "image"):
         qimg = images.get(id(obj)) if images else None
@@ -384,13 +461,14 @@ def _paint_object_pure(painter, obj, doc, *, is_selected: bool = False,
             pix = object_pixmap(doc, obj)
             if pix is not None:
                 painter.drawPixmap(rect, pix, QRectF(pix.rect()))
-            else:
+            elif not no_border:
                 painter.drawRect(rect)
                 painter.drawText(rect, Qt.AlignCenter, "图片缺失")
     elif shape == "text":
         style = obj.text_attr
         painter.fillRect(rect, QColor(255, 248, 205, 210))
-        painter.drawRect(rect)
+        if not no_border:
+            painter.drawRect(rect)
         font = QFont(style["fontfamily"])
         try:
             font.setPixelSize(max(1, int(float(style["pixelsize"]))))
@@ -410,7 +488,7 @@ def _paint_object_pure(painter, obj, doc, *, is_selected: bool = False,
         if style["wrap"] in ("1", "true", "True"):
             flags |= Qt.TextWordWrap
         painter.drawText(rect.adjusted(2, 1, -2, -1), flags, obj.text)
-    else:  # rect
+    elif not no_border:  # rect
         painter.drawRect(rect)
 
     if is_selected and show_nodes and shape in ("polygon", "polyline"):
@@ -438,6 +516,7 @@ class TileBuildJob:
     images: dict = field(default_factory=dict)   # {id(snapshot_obj): QImage}
     show_labels: bool = True
     label_font: object | None = None
+    view_scale: float = 1.0         # 建块时的视图缩放，用于线宽/最小框补偿
     epoch: int = 0                  # 阶段 2 用；阶段 1 恒 0
 
 
@@ -453,12 +532,14 @@ def build_tile_image(job: TileBuildJob) -> QImage:
     p = QPainter(img)
     p.scale(job.lod, job.lod)
     p.translate(-job.bx * _TILE_CACHE, -job.by * _TILE_CACHE)
-    line_w = max(1, int(math.ceil(1.0 / job.lod)))
+    # 缓存只烘焙内容（填充/图片/文字/标签），不描边框：边框由 paint() 每帧
+    # 以 cosmetic pen 在视图层描画，恒 1 屏幕像素，与节点图连线一致。
     for obj, _bounds in job.entries:
         if getattr(obj, "visible", True):
             _paint_object_pure(p, obj, job.doc, is_selected=False,
-                               show_label=job.show_labels, line_width=line_w,
-                               images=job.images, label_font=job.label_font)
+                               show_label=job.show_labels, no_border=True,
+                               images=job.images, label_font=job.label_font,
+                               view_scale=job.view_scale)
     p.end()
     return img
 
@@ -589,6 +670,7 @@ class ObjectLayerItem(QGraphicsItem):
         self._cache_rect = QRectF()
         self._cache_dirty = False
         self._cache_labels = True
+        self._cache_line_w = 1           # 缓存生成时的线宽补偿档（随视图缩放变化）
         # _cache_bounds() 要遍历全部对象做 united；这张真实图有 5500+ 对象、
         # 坐标跨度 1.4 万像素，每帧重算要 12ms 且结果几乎不变。缓存起来，
         # 只在增删（refresh_all）时失效，移动（refresh_rects）时只扩张。
@@ -833,6 +915,14 @@ class ObjectLayerItem(QGraphicsItem):
         self._cb_rect = rect
         return rect
 
+    def _cache_line_width(self) -> int:
+        """按当前视图缩放算出「屏幕 ≥1px」所需的场景线宽。
+
+        缓存位图是场景坐标 1:1，贴回视图时整体缩放 view_scale，
+        所以要画 ceil(1/view_scale) 场景单位，缩小后才不掉到 1px 以下。
+        """
+        return compensated_line_width(self._scale)
+
     def _ensure_cache(self, show_labels: bool) -> QImage | None:
         if len(self.layer.objects) < _CACHE_MIN_OBJECTS or self._scale > 1.0:
             self._obj_cache = None
@@ -851,9 +941,11 @@ class ObjectLayerItem(QGraphicsItem):
         cache.fill(Qt.transparent)
         p = QPainter(cache)
         p.translate(-rect.left(), -rect.top())
+        # 只烘焙内容，边框每帧以 cosmetic pen 描，恒 1 屏幕像素。
         for obj in self.layer.objects:
             if getattr(obj, "visible", True):
-                self._paint_object(p, obj, False, show_label=show_labels)
+                self._paint_object(p, obj, False, show_label=show_labels,
+                                   no_border=True)
         p.end()
         self._obj_cache = cache
         self._cache_rect = rect
@@ -925,7 +1017,7 @@ class ObjectLayerItem(QGraphicsItem):
         entries, images = self._snapshot_tile_entries(bx, by, show_labels)
         job = TileBuildJob(key=key, lod=lod, bx=bx, by=by, doc=self.doc,
                            entries=entries, images=images,
-                           show_labels=show_labels)
+                           show_labels=show_labels, view_scale=self._scale)
         img = build_tile_image(job)
         self._put_tile(key, img)
         self._tile_labels = show_labels
@@ -973,8 +1065,27 @@ class ObjectLayerItem(QGraphicsItem):
                 img, QRectF(0, 0, img.width(), img.height()))
         self._paint_tile_overlays(painter, visible)
 
+    def _paint_cosmetic_borders(self, painter, visible: QRectF):
+        """每帧以 cosmetic pen 描未选中对象边框——恒 1 设备像素。
+
+        缓存位图只包含内容（填充/图片/文字/标签），边框留到视图层每帧描，
+        因此线宽不再随视图缩放变化（与节点图 connection line 同一机制）。
+        实测 1200 个矩形描边约 1.3ms/帧，可忽略。选中态 / 预览由调用方
+        单独用完整样式覆盖，这里跳过，避免同一对象描两次。
+        """
+        sel = self._sel_ids
+        tw, th = self.doc.tile_w, self.doc.tile_h
+        painter.setPen(_PEN_NORMAL)
+        painter.setBrush(Qt.NoBrush)
+        for obj in self._candidates(visible):
+            if not getattr(obj, "visible", True) or id(obj) in sel:
+                continue
+            rect = min_visible_rect(object_rect(obj, tw, th), self._scale)
+            _stroke_shape(painter, obj, rect)
+
     def _paint_tile_overlays(self, painter, visible: QRectF):
-        """缓存块里烘焙的是未选中样式；选中态 / 预览每帧单独覆盖。"""
+        """缓存块里烘焙的是未选中样式；边框每帧 cosmetic 描，选中态 / 预览覆盖。"""
+        self._paint_cosmetic_borders(painter, visible)
         for obj in self.selected:
             if not getattr(obj, "visible", True):
                 continue
@@ -1006,9 +1117,8 @@ class ObjectLayerItem(QGraphicsItem):
     def _build_tile_overview(self):
         """生成整张对象范围的低清 QImage，仅作未就绪块的占位。
 
-        与高分块同样用「缩放 painter + ceil(1/lod) 线宽补偿」，保证
-        drawImage 放回场景后线宽与直接绘制接近；不烘焙标签（低倍率下
-        标签本就隐藏），也不含选中态（选中态每帧单独覆盖）。
+        只烘焙内容，不描边框（边框每帧以 cosmetic pen 描，恒 1px）；
+        不烘焙标签（低倍率下标签本就隐藏），也不含选中态。
         """
         b = self._cache_bounds()
         if b.isEmpty():
@@ -1022,11 +1132,11 @@ class ObjectLayerItem(QGraphicsItem):
         p = QPainter(img)
         p.scale(lod, lod)
         p.translate(-b.left(), -b.top())
-        line_w = max(1, int(math.ceil(1.0 / lod)))
         for obj in self.layer.objects:
             if getattr(obj, "visible", True):
                 _paint_object_pure(p, obj, self.doc, is_selected=False,
-                                   show_label=False, line_width=line_w)
+                                   show_label=False, no_border=True,
+                                   view_scale=self._scale)
         p.end()
         self._tile_overview = img
         self._tile_overview_rect = b
@@ -1080,7 +1190,8 @@ class ObjectLayerItem(QGraphicsItem):
             job = TileBuildJob(
                 key=key, lod=lod, bx=bx, by=by, doc=self.doc,
                 entries=entries, images=images, show_labels=show_labels,
-                label_font=QFont(_LABEL_FONT), epoch=self._tile_epoch)
+                label_font=QFont(_LABEL_FONT), view_scale=self._scale,
+                epoch=self._tile_epoch)
             self._tile_inflight[key] = self._tile_epoch
             _tile_pool().start(_TileBuildRunnable(self._tile_bridge, job))
             dispatched += 1
@@ -1164,7 +1275,8 @@ class ObjectLayerItem(QGraphicsItem):
         for obj in self._candidates(dirty):
             if getattr(obj, "visible", True) \
                     and self._obj_bounds(obj).intersects(dirty):
-                self._paint_object(p, obj, False, show_label=self._cache_labels)
+                self._paint_object(p, obj, False, show_label=self._cache_labels,
+                                   no_border=True)
         p.end()
 
     # ---------------- 绘制 ----------------
@@ -1226,7 +1338,8 @@ class ObjectLayerItem(QGraphicsItem):
                     src, cache,
                     src.translated(-self._cache_rect.left(),
                                    -self._cache_rect.top()))
-            # 缓存里画的是未选中样式；选中态 / 节点手柄单独覆盖这几帧。
+            # 缓存只烘焙了内容；边框每帧 cosmetic 描（恒 1px），选中态再覆盖。
+            self._paint_cosmetic_borders(painter, visible)
             for obj in self.selected:
                 if not getattr(obj, "visible", True):
                     continue
@@ -1275,8 +1388,12 @@ class ObjectLayerItem(QGraphicsItem):
                             f"组：{gname}")
 
     def _paint_object(self, painter, obj, is_selected: bool, preview: bool = False,
-                      show_label: bool = True, line_width: int | None = None):
+                      show_label: bool = True, line_width: int | None = None,
+                      view_scale: float | None = None, no_border: bool = False):
         """实例薄包装：委托给纯函数 _paint_object_pure，保持其他绘制路径不变。"""
-        _paint_object_pure(painter, obj, self.doc, is_selected=is_selected,
-                           preview=preview, show_label=show_label,
-                           line_width=line_width, show_nodes=self.show_nodes)
+        _paint_object_pure(
+            painter, obj, self.doc, is_selected=is_selected,
+            preview=preview, show_label=show_label,
+            line_width=line_width, show_nodes=self.show_nodes,
+            view_scale=self._scale if view_scale is None else view_scale,
+            no_border=no_border)

@@ -1,12 +1,20 @@
 """TMX 读取：XML DOM -> MapDocument，保留原树用于保真写回。"""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ..document.layer import ObjectLayer, TileLayer
 from ..document.map_document import MapDocument
 from ..document.map_object import MapObject, parse_points
-from ..document.properties import PropertyBag
+from ..document.properties import (
+    HIDDEN_EDITOR_PROPERTIES,
+    PropertyBag,
+    WAVE_GEN_TYPE,
+    WAVE_TABLE_TYPE,
+    WAVE_MARK_PROPERTY,
+    WAVE_TABLE_MARK_PROPERTY,
+)
 from ..rw import game_decor, unit_names
 from ..utils.paths import as_path
 from .layer_codec import decode
@@ -189,21 +197,103 @@ def read_document(path, profile=None, resolver: ResourceResolver | None = None,
                 # 链式 spawnChance -> 反推「随机生成单位」独立属性（可带权重）
                 if (obj.type_ == "unitAdd"
                         and "randomUnits" not in obj.properties.values):
-                    pairs = unit_names.weights_from_spawn_units(
+                    triples = unit_names.units_from_spawn_units(
                         obj.properties.get("spawnUnits", ""))
-                    if pairs:
+                    if triples:
                         obj.properties.set(
-                            "randomUnits", unit_names.format_weighted(pairs))
+                            "randomUnits", unit_names.format_units(triples))
                 layer.objects.append(obj)
             doc.layers.append(layer)
 
     report(88, "整理图层…")
+    _apply_editor_layout(doc, p)
+    _restore_editor_node_types(doc)
     _strip_decor_cells(doc)
     doc.rebuild_index()
     report(94, "应用图层规则…")
     _apply_layer_rules(doc)
     report(100, "完成")
     return doc
+
+
+def _apply_editor_layout(doc: MapDocument, path: Path | None = None) -> None:
+    """从地图根属性 rwmap_layout 还原节点图布局。
+
+    游戏只校验触发器对象的属性名，地图根属性随便写（真实生存图就有
+    fill / tag / sw1..sw6 等自定义键）。因此布局数据存在根属性里，既留在
+    TMX 又不触发游戏的 Key was not used 报错。旧版单独 JSON 文件也兼容读取。
+    """
+    raw = doc.properties.get("rwmap_layout", "")
+    if not raw:
+        # 兼容早期版本的 .rwmap-layout.json sidecar
+        if path is None:
+            return
+        sidecar = path.with_name(path.stem + ".rwmap-layout.json")
+        if not sidecar.exists():
+            return
+        try:
+            raw = sidecar.read_text(encoding="utf-8")
+        except OSError:
+            return
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return
+    objects = data.get("objects", {}) if isinstance(data, dict) else {}
+    if not isinstance(objects, dict):
+        return
+    for layer in doc.layers:
+        if not isinstance(layer, ObjectLayer):
+            continue
+        for obj in layer.objects:
+            private = objects.get(f"{layer.name}:{obj.object_id}")
+            if not isinstance(private, dict):
+                continue
+            for key, value in private.items():
+                if (key in HIDDEN_EDITOR_PROPERTIES
+                        and key not in obj.properties.values):
+                    obj.properties.set(key, str(value), "string")
+
+
+def _restore_editor_node_types(doc: MapDocument) -> int:
+    """读盘后自动检测并修复编辑器私有编排节点，返回修复个数。
+
+    老地图 / 早期脚本建的波次节点，写盘时 type 被写成空（靠 rwmap_layout 里
+    的私有标记还原）。重开后 ``type_`` 是空的，只留下私有标记。这里按标记把
+    它们认回来，做两件事：
+
+    1. 恢复内部 ``type_``（waveGen / waveTable）。这样保存时写盘别名表能命中
+       ``waveGen -> point``，不会再写出空 type —— 根治游戏反复弹
+       ``Skipping trigger: X - no properties found`` 的 desync 错误。
+    2. 顺带归一为隐藏，避免老脚本建的可见节点跑到画布左上角。
+
+    必须在 ``_apply_editor_layout`` 之后调用（私有标记那一步才还原到对象上）。
+    已经是正确 type 且隐藏的节点不动，不无谓标脏。
+    """
+    fixed = 0
+    for layer in getattr(doc, "layers", []) or []:
+        if not isinstance(layer, ObjectLayer):
+            continue
+        for obj in layer.objects:
+            values = getattr(getattr(obj, "properties", None), "values", {}) or {}
+            mark_wave = str(values.get(WAVE_MARK_PROPERTY, "") or "").strip() == "1"
+            mark_table = str(values.get(WAVE_TABLE_MARK_PROPERTY, "") or "").strip() == "1"
+            if not (mark_wave or mark_table):
+                continue
+            want = WAVE_GEN_TYPE if mark_wave else WAVE_TABLE_TYPE
+            changed = False
+            if str(getattr(obj, "type_", "") or "") != want:
+                obj.type_ = want
+                changed = True
+            if obj.visible:
+                obj.visible = False
+                changed = True
+            if changed:
+                layer.dirty = True
+                fixed += 1
+    if fixed:
+        doc.dirty = True
+    return fixed
 
 
 def _strip_decor_cells(doc: MapDocument) -> None:

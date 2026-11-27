@@ -19,7 +19,9 @@ from rwmap.document.map_object import MapObject  # noqa: E402
 from rwmap.io.tmx_writer import create_blank_document  # noqa: E402
 from rwmap.rw.resize import connected_blocks, shift_cells, shift_objects  # noqa: E402
 from rwmap.rw.version import active_profile  # noqa: E402
-from rwmap.widgets.resize_map_dialog import ResizeMapDialog, ResizePreview  # noqa: E402
+from rwmap.widgets.resize_map_dialog import (  # noqa: E402
+    ResizeMapDialog, ResizePreview, clamp_offset,
+)
 
 
 _app = QApplication.instance() or QApplication([])
@@ -70,6 +72,23 @@ class ResizePureTest(unittest.TestCase):
         self.assertEqual(len(allkept), 2)
 
 
+class ClampOffsetTest(unittest.TestCase):
+    def test_equal_size_locks_offset(self):
+        self.assertEqual(clamp_offset(3, -2, 8, 8, 8, 8), (0, 0))
+
+    def test_bigger_new_map_keeps_old_content_inside(self):
+        self.assertEqual(clamp_offset(6, -3, 12, 12, 8, 8), (4, 0))
+        self.assertEqual(clamp_offset(2, 1, 12, 12, 8, 8), (2, 1))
+
+    def test_smaller_new_map_keeps_new_frame_inside_old_content(self):
+        self.assertEqual(clamp_offset(-5, 3, 6, 6, 8, 8), (-2, 0))
+        self.assertEqual(clamp_offset(-1, -1, 6, 6, 8, 8), (-1, -1))
+
+    def test_mixed_axes(self):
+        # 宽变大、高变小：X 走 [0,4]，Y 走 [-2,0]
+        self.assertEqual(clamp_offset(-1, -5, 12, 6, 8, 8), (0, -2))
+
+
 class ResizeDialogTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -92,12 +111,12 @@ class ResizeDialogTest(unittest.TestCase):
 
     def test_spin_change_updates_preview_overflow(self):
         dlg = ResizeMapDialog(self.doc)
-        dlg.sp_x.setValue(1)  # (7,7) -> (8,7)，新宽 8 => 溢出
+        dlg.sp_width.setValue(7)  # 新宽 7 < 旧宽 8；(7,7) 落在新图外 => 溢出
         QApplication.processEvents()
         cells, blocks, rects = dlg.preview.overflow_info()
         self.assertEqual(cells, 1)
         self.assertEqual(blocks, 1)
-        self.assertEqual(rects, [(8, 7, 8, 7)])
+        self.assertEqual(rects, [(7, 7, 7, 7)])
         dlg.close()
 
     def test_preview_drag_signal(self):
@@ -114,11 +133,50 @@ class ResizeDialogTest(unittest.TestCase):
 
     def test_preview_offset_signal_updates_spinboxes(self):
         dlg = ResizeMapDialog(self.doc)
+        dlg.sp_width.setValue(12)  # X 可到 4
+        dlg.sp_height.setValue(6)  # Y 可到 -2
         dlg.preview.offsetChanged.emit(3, -2)
         QApplication.processEvents()
         self.assertEqual(dlg.sp_x.value(), 3)
         self.assertEqual(dlg.sp_y.value(), -2)
         self.assertEqual(dlg.preview.preview_params()[2:4], (3, -2))
+        dlg.close()
+
+    def test_buttons_are_chinese_and_clickable(self):
+        dlg = ResizeMapDialog(self.doc)
+        buttons = dlg.buttons.buttons()
+        labels = [b.text() for b in buttons]
+        self.assertIn("确定", labels)
+        self.assertIn("取消", labels)
+        for b in buttons:
+            self.assertGreaterEqual(b.minimumWidth(), 76)
+            self.assertGreaterEqual(b.minimumHeight(), 28)
+        dlg.close()
+
+    def test_equal_size_cannot_move(self):
+        dlg = ResizeMapDialog(self.doc)
+        dlg.preview.offsetChanged.emit(3, -2)
+        QApplication.processEvents()
+        self.assertEqual((dlg.sp_x.value(), dlg.sp_y.value()), (0, 0))
+        self.assertEqual(dlg.preview.preview_params()[2:4], (0, 0))
+        dlg.close()
+
+    def test_bigger_new_map_clamps_drag_offset(self):
+        dlg = ResizeMapDialog(self.doc)
+        dlg.sp_width.setValue(12)
+        dlg.sp_height.setValue(11)
+        dlg.preview.offsetChanged.emit(9, -4)
+        QApplication.processEvents()
+        self.assertEqual((dlg.sp_x.value(), dlg.sp_y.value()), (4, 0))
+        dlg.close()
+
+    def test_smaller_new_map_clamps_drag_offset(self):
+        dlg = ResizeMapDialog(self.doc)
+        dlg.sp_width.setValue(6)
+        dlg.sp_height.setValue(7)
+        dlg.preview.offsetChanged.emit(-9, 4)
+        QApplication.processEvents()
+        self.assertEqual((dlg.sp_x.value(), dlg.sp_y.value()), (-2, 0))
         dlg.close()
 
     def test_drag_freezes_scale_and_maps_1to1(self):
@@ -127,6 +185,7 @@ class ResizeDialogTest(unittest.TestCase):
         from PySide6.QtGui import QMouseEvent
         dlg = ResizeMapDialog(self.doc)
         dlg.resize(560, 520)
+        dlg.sp_width.setValue(12)  # 新图更大，允许向右挪
         QApplication.processEvents()
         pv = dlg.preview
         c = pv.rect().center()

@@ -21,8 +21,9 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QLabel, QToolBar, QToolButton
 
 from ..document.layer import ObjectLayer
-from ..theme import ASH, INK, TEXT, TEXT_DIM
+from ..theme import ASH, TEXT, TEXT_DIM
 from .flow_layout import FlowHost
+from .plain_spinbox import PlainSpinBox
 
 # (id, 名称, 快捷键, 说明)
 TOOLS = (
@@ -34,6 +35,9 @@ TOOLS = (
     ("select", "选择 / 框选", "S",
      "选择 / 框选：点对象选中并拖动、拖手柄缩放；瓦片层拖空白框选瓦片，"
      "对象层拖空白框选多个对象（S / M）"),
+    ("ruler", "标尺", "K",
+     "点两个格子测距（含两端），可连续测多段；右侧「分段」均分标记，"
+     "右键清除标尺（K）"),
     ("nodes", "编辑节点", "N", "拖动多边形或折线的顶点"),
     ("rect", "插入矩形", "R", "拖出一个矩形对象"),
     ("point", "插入点", "P", "单击放置一个点对象"),
@@ -184,6 +188,19 @@ def make_object_icon(kind: str) -> QIcon:
                                 (16, 24), (13, 17), (20, 17)]))
         p.setBrush(Qt.NoBrush)
         p.drawPolyline(_polygon([(21, 4), (21, 12), (25, 12)]))
+    elif kind == "ruler":
+        # 斜置尺身 + 刻度：亮蓝描边，局部琥珀刻度呼应等分标记色。
+        p.setBrush(QColor(90, 175, 245, 55))
+        body = _polygon([(7, 20), (21, 6), (24, 9), (10, 23)])
+        p.drawPolygon(body)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(_ICON_BLUE, 1.2))
+        for t in (0.25, 0.5, 0.75):
+            x = 7 + (21 - 7) * t + (10 - 7) * t
+            y = 20 + (6 - 20) * t + (23 - 20) * t
+            p.drawLine(x - 2, y - 2, x + 2, y + 2)
+        p.setPen(QPen(QColor(255, 205, 70), 1.6))
+        p.drawLine(7, 20, 10, 23)
     elif kind == "nodes":
         p.setBrush(Qt.NoBrush)
         p.drawPolyline(_polygon([(4, 21), (10, 8), (19, 16), (24, 6)]))
@@ -291,6 +308,7 @@ QToolButton:checked:disabled {{ background: transparent; }}
 class ObjectToolBar(QToolBar):
     toolChanged = Signal(str)
     layerChanged = Signal(object)
+    segmentsChanged = Signal(int)      # 标尺等分段数
 
     # 竖排时一排排几个：16 个工具按 4 列排就是 4×4 的方格，比 16 行窄一半还多。
     # 面板被拉宽时 FlowHost 会自己塞进更多列，这个值只是「初始几列」。
@@ -367,6 +385,45 @@ class ObjectToolBar(QToolBar):
             action = self.actions_by_id.get(tid)
             if action is not None:
                 action.setEnabled(active)
+
+    def add_ruler_controls(self):
+        """在工具栏最右侧（变换按钮之后）加「分段」输入框，默认 1。
+
+        只做 UI 与信号；等分计算由标尺覆盖层负责。切工具 / 右键清除都不动它。
+        """
+        if getattr(self, "_segments_spin", None) is not None:
+            return
+        self.removeAction(self._hint_action)
+        lbl = QLabel("分段", self)
+        lbl.setStyleSheet(f"color:{TEXT_DIM}; padding-left:2px;")
+        # addWidget 返回 QWidgetAction：显隐必须操作 action，直接对 widget 调
+        # setVisible 在工具栏里不可靠（widget 实际由 action 托管）。
+        self._ruler_label_action = self.addWidget(lbl)
+        spin = PlainSpinBox(self)
+        spin.setRange(1, 64)
+        spin.setValue(1)
+        spin.setFixedWidth(52)
+        spin.setToolTip("标尺等分段数：1 为不分段；N>1 时在测量段中间标 N-1 个瓦片")
+        # 绝不给 NoButtons 的 QSpinBox 设带 border/border-radius 的局部 QSS：
+        # Qt 6.12 Windows11 样式下会把内部 QLineEdit 压成 1px 宽，数字看不见。
+        # 边框统一交给 theme._FocusStyle 代理在 drawComplexControl 里画。
+        spin.valueChanged.connect(self.segmentsChanged.emit)
+        self._ruler_spin_action = self.addWidget(spin)
+        self._segments_spin = spin
+        self._hint_action = self.addWidget(self.hint)
+        # 只在标尺工具激活时显示，初始隐藏。
+        self.set_ruler_controls_visible(False)
+
+    def set_ruler_controls_visible(self, visible: bool):
+        """分段标签 + 输入框只在标尺工具下出现，其余工具隐藏。"""
+        for action in (getattr(self, "_ruler_label_action", None),
+                       getattr(self, "_ruler_spin_action", None)):
+            if action is not None:
+                action.setVisible(bool(visible))
+
+    def segments(self) -> int:
+        spin = getattr(self, "_segments_spin", None)
+        return spin.value() if spin is not None else 1
 
     def add_transform_actions(self, items):
         """把 4 个变换按钮排在「瓦片画笔」文字标签之前（图标左、文字右）。

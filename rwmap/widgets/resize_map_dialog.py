@@ -12,8 +12,11 @@
 - 平移后落在新地图之外的瓦片（溢出瓦片）用**连通块红框**圈住 —— 一段连续
   的溢出格只画一个大框，且线宽 1px（与图章越界红框同款、保持细线）。
 
-底部是「移除地图之外的对象」勾选框 + OK / Cancel。所有数值由 ``values()``
+底部是「移除地图之外的对象」勾选框 + 确定 / 取消。所有数值由 ``values()``
 一次性取走，真正的图层重建交给 ``rw.resize`` 的纯算法 + 撤销命令。
+
+挪动限制（与 Tiled 一致）：新尺寸等于旧尺寸时锁 0；新尺寸更大时旧内容整块
+留在新图内；新尺寸更小时新图整块留在旧内容内。两轴独立计算。
 """
 from __future__ import annotations
 
@@ -38,6 +41,22 @@ _OBJ_BLUE = QColor(90, 158, 224)
 _DASH = QColor(206, 206, 206)
 _RED = QColor(255, 70, 70)
 _RED_LINE = 1  # 用户要求：红框线条粗细与参考图一致（细线，非逐格 2px）
+
+
+def clamp_offset(dx, dy, nw, nh, ow, oh):
+    """把挪动量限制在合法区间：两轴各自按新旧尺寸关系取闭区间。
+
+    - 新 == 旧：只能 0，不能挪。
+    - 新 > 旧：旧内容不能越出新图 -> 0 <= d <= 新 - 旧。
+    - 新 < 旧：新图不能越出旧内容 -> 旧 - 新 的负值 <= d <= 0。
+    """
+    def axis(d, new, old):
+        if new == old:
+            return 0
+        delta = new - old
+        return max(min(0, delta), min(d, max(0, delta)))
+
+    return axis(dx, nw, ow), axis(dy, nh, oh)
 
 
 class ResizePreview(QWidget):
@@ -76,7 +95,9 @@ class ResizePreview(QWidget):
     def set_params(self, nw: int, nh: int, dx: int, dy: int, remove: bool = False):
         need_thumb = self._doc is not None and (nw, nh) != (self._nw, self._nh)
         self._nw, self._nh = max(1, nw), max(1, nh)
-        self._dx, self._dy = dx, dy
+        ow = self._doc.width if self._doc is not None else self._nw
+        oh = self._doc.height if self._doc is not None else self._nh
+        self._dx, self._dy = clamp_offset(dx, dy, self._nw, self._nh, ow, oh)
         self._remove = remove
         if need_thumb:
             self._build_thumbnail()
@@ -274,6 +295,10 @@ class ResizePreview(QWidget):
         dy_px = pos.y() - self._drag_pos.y()
         ndx = self._drag_offset[0] + int(round(dx_px / self._drag_scale))
         ndy = self._drag_offset[1] + int(round(dy_px / self._drag_scale))
+        doc = self._doc
+        ow = doc.width if doc is not None else self._nw
+        oh = doc.height if doc is not None else self._nh
+        ndx, ndy = clamp_offset(ndx, ndy, self._nw, self._nh, ow, oh)
         if (ndx, ndy) != (self._dx, self._dy):
             self.offsetChanged.emit(ndx, ndy)
         event.accept()
@@ -292,6 +317,7 @@ class ResizeMapDialog(QDialog):
 
     def __init__(self, doc, parent=None):
         super().__init__(parent)
+        self._doc = doc
         self.setWindowTitle("调整地图尺寸")
         self.resize(560, 520)
 
@@ -332,9 +358,15 @@ class ResizeMapDialog(QDialog):
         self.chk_remove = QCheckBox("移除地图之外的对象", self)
         self.chk_remove.setChecked(True)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        # 同其他对话框：中文按钮 + 足够点击区域（Windows11 样式默认按钮过小）
+        buttons = QDialogButtonBox(self)
+        ok = buttons.addButton("确定", QDialogButtonBox.AcceptRole)
+        ok.setDefault(True)
+        cancel = buttons.addButton("取消", QDialogButtonBox.RejectRole)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        for btn in (ok, cancel):
+            btn.setMinimumSize(76, 28)
         self.buttons = buttons
 
         bottom = QHBoxLayout()
@@ -356,6 +388,11 @@ class ResizeMapDialog(QDialog):
         self._on_params_changed()
 
     def _on_preview_offset(self, dx, dy):
+        doc = self._doc
+        ow = doc.width if doc is not None else self.sp_width.value()
+        oh = doc.height if doc is not None else self.sp_height.value()
+        dx, dy = clamp_offset(dx, dy, self.sp_width.value(),
+                              self.sp_height.value(), ow, oh)
         if self.sp_x.value() != dx:
             self.sp_x.setValue(dx)
         if self.sp_y.value() != dy:
@@ -381,4 +418,4 @@ class ResizeMapDialog(QDialog):
         }
 
 
-__all__ = ["ResizeMapDialog", "ResizePreview"]
+__all__ = ["ResizeMapDialog", "ResizePreview", "clamp_offset"]

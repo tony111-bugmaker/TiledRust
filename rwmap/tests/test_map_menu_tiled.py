@@ -3,7 +3,7 @@
 覆盖：
 1. 菜单结构：6 项新功能就位 + 快捷键；绘制时自动地图只在菜单、不在对象工具栏。
 2. 添加外部图块(.tsx)：模型 + DOM 同步、去重、一条撤销可还原。
-3. 自动裁剪：裁到内容 bbox、对象坐标平移、一条撤销可还原、空图跳过。
+3. 自动裁剪：只按瓦片内容 bbox、对象不撑大边界但跟着平移、一条撤销可还原、空图跳过。
 4. 转到图块：调用 centerOn（纯视图）。
 5. 上/下一个图块集：循环切换 tab（纯视图）。
 6. 地图属性：对话框值写回内存 + DOM、一条撤销可还原、取消不改文档。
@@ -185,9 +185,11 @@ class TestAutocrop(MapMenuBase):
     def test_crop_translates_objects(self):
         doc = MapDocument(path=Path("crop_obj.tmx"), width=10, height=10,
                           tile_w=20, tile_h=20, profile=self.w.state.profile)
-        obj = MapObject(x=2 * 20, y=2 * 20, width=20, height=20)
-        ol = ObjectLayer(name="Objects", objects=[obj])
-        doc.layers = [ol]
+        cells = [0] * 100
+        cells[2 * 10 + 2] = 1
+        obj = MapObject(x=8 * 20, y=8 * 20, width=20, height=20)
+        doc.layers = [TileLayer(width=10, height=10, name="Ground", cells=cells),
+                      ObjectLayer(name="Objects", objects=[obj])]
         ctx = AppState()
         ctx.open_document(doc)
         self.w._contexts.append(ctx)
@@ -196,10 +198,39 @@ class TestAutocrop(MapMenuBase):
         _app.processEvents()
         self.w._autocrop()
         _app.processEvents()
-        # 对象像素 (40,40) 尺寸 20×20，正好占 (2,2) 一格 → 裁剪后 1×1
+        # 瓦片只在 (2,2) → 裁成 1×1；远处对象不撑大边界，但仍跟着平移
         self.assertEqual((doc.width, doc.height), (1, 1))
         moved = doc.layer_by_name("Objects").objects[0]
-        self.assertEqual((moved.x, moved.y), (0, 0))
+        self.assertEqual((moved.x, moved.y), (6 * 20, 6 * 20))
+
+    def test_objects_outside_tiles_do_not_expand_bbox(self):
+        doc, _ctx = self.make_small_doc()
+        obj = MapObject(x=9 * 20, y=9 * 20, width=20, height=20)
+        doc.layers.append(ObjectLayer(name="Objects", objects=[obj]))
+        self.w._refresh_document()
+        _app.processEvents()
+        self.w._autocrop()
+        _app.processEvents()
+        # 瓦片内容 c2..5 / r2..4 → 4×3；右下角对象不改变尺寸
+        self.assertEqual((doc.width, doc.height), (4, 3))
+        moved = doc.layer_by_name("Objects").objects[0]
+        self.assertEqual((moved.x, moved.y), (7 * 20, 7 * 20))
+
+    def test_objects_only_noop(self):
+        doc = MapDocument(path=Path("crop_obj_only.tmx"), width=10, height=10,
+                          tile_w=20, tile_h=20, profile=self.w.state.profile)
+        doc.layers = [ObjectLayer(name="Objects", objects=[
+            MapObject(x=2 * 20, y=2 * 20, width=20, height=20)])]
+        ctx = AppState()
+        ctx.open_document(doc)
+        self.w._contexts.append(ctx)
+        self.w._attach_context(ctx)
+        self.w._refresh_document()
+        _app.processEvents()
+        self.w._autocrop()
+        _app.processEvents()
+        self.assertEqual((doc.width, doc.height), (10, 10))
+        self.assertIn("空", self.w.statusBar().currentMessage())
 
     def test_empty_map_noop(self):
         doc = MapDocument(path=Path("crop_empty.tmx"), width=5, height=5,

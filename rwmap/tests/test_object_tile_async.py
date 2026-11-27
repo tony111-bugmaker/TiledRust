@@ -139,7 +139,8 @@ class BuildTileImageTest(unittest.TestCase):
                                doc=doc, entries=entries)
         got = oli.build_tile_image(job)
 
-        # 手工用同一 pure 函数按相同变换画一遍，应逐像素一致
+        # 手工用同一 pure 函数按相同变换画一遍，应逐像素一致。
+        # 缓存只烘焙内容（no_border），边框由 paint() 每帧 cosmetic 描。
         side = 640
         ref = QImage(side, side, QImage.Format_ARGB32)
         ref.fill(Qt.transparent)
@@ -148,7 +149,7 @@ class BuildTileImageTest(unittest.TestCase):
         p.translate(0, 0)
         for o in objs:
             oli._paint_object_pure(p, o, doc, is_selected=False,
-                                   show_label=True, line_width=1)
+                                   show_label=True, no_border=True)
         p.end()
         self.assertEqual(_diff(got, ref), 0)
 
@@ -457,7 +458,7 @@ class LowZoomSmoothFillTest(unittest.TestCase):
         return oli.ObjectLayerItem(ObjectLayer(name="T", objects=objs), doc)
 
     def test_missing_block_draws_low_detail_overview_placeholder(self):
-        """未就绪块先贴整图占位，第一帧就有对象框，而不是空白逐块出现。"""
+        """未就绪块时第一帧就有可见对象（cosmetic 边框），不是空白逐块出现。"""
         from unittest import mock
 
         item = self._item()
@@ -471,19 +472,13 @@ class LowZoomSmoothFillTest(unittest.TestCase):
                                center=(300, 250))
             self.assertIsNotNone(item._tile_overview,
                                  "低倍率应生成整图占位图")
-            with_overview = sum(
+            visible = sum(
                 1 for y in range(img.height()) for x in range(img.width())
                 if (img.pixel(x, y) >> 24) & 255)
-
-            item._tile_overview = None
-            with mock.patch.object(item, "_build_tile_overview", lambda: None):
-                img2 = _render_item(item, scale=0.1, viewport=(640, 480),
-                                    center=(300, 250))
-            without = sum(
-                1 for y in range(img2.height()) for x in range(img2.width())
-                if (img2.pixel(x, y) >> 24) & 255)
-            self.assertGreater(with_overview, without,
-                               "占位图应让缺块区域立刻出现对象框")
+            # 块全部未就绪（idle pool 不建块），但边框每帧 cosmetic 描，
+            # 首帧仍应有大量可见像素，不会是空白。
+            self.assertGreater(visible, 500,
+                               "块未就绪时边框也应在首帧可见，不空白")
 
     def test_low_lod_cache_not_limited_by_old_256_blocks(self):
         """低 LOD 块 25KB，视口要近千块；按字节预算不能卡在 256 块。"""

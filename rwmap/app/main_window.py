@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..app.app_state import AppState
+from ..app.local_service import LocalControlService
+from ..app.local_service_actions import LocalServiceActionsMixin
 from ..app.map_loader import MapLoadController, MapLoadSignals
 from ..app.panel_layout import (
     PANEL_SPECS, apply_default_layout, ensure_panel_object_names, iter_panels,
@@ -44,7 +46,7 @@ from ..view import MapScene, MapView
 from ..widgets import (
     LayersDock, ObjectToolBar, PanelSettingsDialog, ProbeWindow,
     PropertiesDock, TilesetPropsDock, TilesetTilePropsDock, TilesetsDock,
-    TriggerGraphDock, install_dock_tab_detach,
+    TriggerGraphDock, UnitGalleryDialog, install_dock_tab_detach,
 )
 from ..widgets.minimap import MiniMapDock
 from ..widgets.new_tileset_dialog import NewTilesetDialog
@@ -82,7 +84,7 @@ QTabBar::scroller {{ width: 16px; }}
 """
 
 
-class MainWindow(QMainWindow):
+class MainWindow(LocalServiceActionsMixin, QMainWindow):
     def __init__(self, auto_open: bool = True):
         super().__init__()
         # 双色暗色主题：菜单栏 / 状态栏 / 分隔条等原生部件不吃各面板自己的
@@ -125,6 +127,9 @@ class MainWindow(QMainWindow):
         self._object_layer = None
         self._object_pending = None
         self._group_counter = 0          # 组合 id 生成器（右键「组合」用）
+        # 标尺：多段测量状态，切工具不清，仅标尺工具右键清空
+        self._ruler_segments: list[tuple[int, int, int, int]] = []
+        self._ruler_pending: tuple[int, int] | None = None
 
         # ---- 钢笔 / 贝塞尔矢量曲线（独立于 _object_pending，避免与
         #      多边形 pending / 节点拖动的状态机互相误伤） ----
@@ -259,6 +264,15 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_status()
         self._connect_signals()
+        # 本地 AI 控制服务：信号桥必须在 GUI 线程构造（此处即 GUI 线程）。
+        # 请求用 QueuedConnection 投递回本窗口的 _on_local_request 执行，
+        # 保证所有 doc/scene 操作都在 GUI 线程、且进撤销栈。
+        self._local_service = LocalControlService(self)
+        self._local_service.request_received.connect(
+            self._on_local_request, Qt.ConnectionType.QueuedConnection)
+        if self._local_service.config.get("enabled", True):
+            # 延迟到事件循环起来后再监听，避免构造期阻塞；端口占用会写 last_error。
+            QTimer.singleShot(0, self._start_local_service)
         # 统一收口「空白右键菜单」：所有滚动类控件的 viewport 默认策略是
         # DefaultContextMenu，右键拖动结束会弹一个空白小菜单（一闪而过）。
         # 这里在装配完成后一次性关掉，新增面板/视图无需各自记得处理。
@@ -493,6 +507,13 @@ class MainWindow(QMainWindow):
         self.act_resize = QAction("调整地图尺寸…", self)
         self.act_resize.triggered.connect(self._resize_map)
 
+        # ---- 设置：本地 AI 控制服务 ----
+        self.act_local_service = QAction("本地 AI 控制服务", self)
+        self.act_local_service.setCheckable(True)
+        self.act_local_service.setToolTip(
+            "仅监听 127.0.0.1:8765，需令牌鉴权。开启后 AI 可实时读写地图（可撤销）")
+        self.act_local_service.triggered.connect(self._toggle_local_service)
+
         # ---- 设置：面板清单与布局导入 / 导出 ----
         self.act_panel_settings = QAction("面板列表设置", self)
         self.act_panel_settings.setToolTip("勾选显示 / 隐藏哪些面板，并查看面板清单")
@@ -511,6 +532,11 @@ class MainWindow(QMainWindow):
         self.act_trigger_graph.setToolTip(
             "以独立窗口打开 Triggers 对象层的只读节点图（矩形 / 点 / 线等全部对象）")
         self.act_trigger_graph.triggered.connect(self._toggle_trigger_graph)
+
+        # 单位图鉴：只读浏览游戏本体的单位外观 / 中文名 / 贴图，独立窗口。
+        self.act_unit_gallery = QAction("单位图鉴", self)
+        self.act_unit_gallery.setToolTip("浏览游戏单位的拼装外观、官方中文名、属性与贴图部件")
+        self.act_unit_gallery.triggered.connect(self._open_unit_gallery)
 
         file_menu = self.menuBar().addMenu("文件")
         # Tiled 式「新建」置顶子菜单：点开先选新建地图 / 新建瓦片图集。
@@ -563,7 +589,12 @@ class MainWindow(QMainWindow):
         map_menu.addAction(self.act_next_tileset)
         map_menu.addSeparator()
         map_menu.addAction(self.act_map_properties)
+        tools_menu = self.menuBar().addMenu("工具")
+        tools_menu.addAction(self.act_unit_gallery)
+
         settings_menu = self.menuBar().addMenu("设置")
+        settings_menu.addAction(self.act_local_service)
+        settings_menu.addSeparator()
         settings_menu.addAction(self.act_panel_settings)
         settings_menu.addSeparator()
         settings_menu.addAction(self.act_import_panels)
@@ -593,6 +624,9 @@ class MainWindow(QMainWindow):
             (self.act_rot_cw, "rot_cw"),
             (self.act_rot_ccw, "rot_ccw"),
         ])
+        # 标尺「分段」输入框排在工具栏最右（变换按钮之后）
+        self.object_toolbar.add_ruler_controls()
+        self.object_toolbar.segmentsChanged.connect(self._on_ruler_segments_changed)
         # 「绘制时自动地图」按用户要求只在「地图」菜单显示，不再放工具栏。
         # 对象工具栏此刻才存在，补进「视图 → 视图和工具栏」的勾选列表。
         self._append_toolbar_toggles()
@@ -778,6 +812,17 @@ class MainWindow(QMainWindow):
             msg += "；" + "；".join(report["warnings"])
         self.statusBar().showMessage(msg)
 
+    # ---------------- 工具：单位图鉴（独立窗口） ----------------
+    def _open_unit_gallery(self):
+        dlg = getattr(self, "_unit_gallery_dlg", None)
+        if dlg is None:
+            dlg = UnitGalleryDialog(self)
+            self._unit_gallery_dlg = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        self.statusBar().showMessage("单位图鉴：多部件单位按游戏 ini 坐标拼成完整外观")
+
     # ---------------- 设置：触发器节点图（独立窗口） ----------------
     def _toggle_trigger_graph(self, checked: bool):
         dock = self.trigger_graph_dock
@@ -899,6 +944,7 @@ class MainWindow(QMainWindow):
         self.tileset_props_dock.applied.connect(
             lambda _t: self._refresh_after_tileset_settings())
         self.trigger_graph_dock.objectSelected.connect(self._on_object_selected)
+        self.trigger_graph_dock.objectsSelected.connect(self._on_objects_selected)
         self.trigger_graph_dock.objectActivateRequested.connect(self._focus_object_on_map)
         self.trigger_graph_dock.visibilityChanged.connect(self._on_graph_visibility)
 
@@ -953,7 +999,10 @@ class MainWindow(QMainWindow):
 
     def _finish_open(self, ctx: AppState, path: Path):
         """doc 已装入 ctx 后的公共收尾：attach + 状态栏。同步/异步路径共用。"""
-        self._own_file = False
+        # 打开的文件就归当前编辑会话所有：用户按「保存」应直接写回这个文件，
+        # 不能再弹「另存为」。只读版本由 profile.write_enabled 在 _save 里拦截，
+        # 不会误覆盖只读/官方地图，所以这里无需用 _own_file 做二次保护。
+        self._own_file = True
         self._attach_context(ctx)
         legacy_note = "（1.14 地图，已自动按 1.15 规则读取）" \
             if "1.14" in str(path) else ""
@@ -1012,7 +1061,48 @@ class MainWindow(QMainWindow):
         self.load_progress.hide()
         self.load_progress.setFormat("")
 
+    # ---------------- 本地 AI 控制服务 ----------------
+    def _start_local_service(self):
+        svc = self._local_service
+        if svc.is_running():
+            self.act_local_service.setChecked(True)
+            return
+        ok = svc.start()
+        self.act_local_service.setChecked(ok)
+        if ok:
+            cfg = svc.config
+            token_file = getattr(svc, "token_display", "")
+            self.statusBar().showMessage(
+                f"本地 AI 控制服务已启动：http://{cfg['host']}:{cfg['port']} "
+                f"（令牌见 config/local_service_token.txt）")
+        else:
+            self.statusBar().showMessage(
+                f"本地 AI 控制服务启动失败：{getattr(svc, 'last_error', '')}")
+
+    def _toggle_local_service(self, checked: bool):
+        svc = self._local_service
+        if checked:
+            ok = svc.start()
+            if not ok:
+                self.act_local_service.setChecked(False)
+                self.statusBar().showMessage(
+                    f"本地 AI 控制服务启动失败：{getattr(svc, 'last_error', '')}")
+                return
+            cfg = svc.config
+            self.statusBar().showMessage(
+                f"本地 AI 控制服务已启动：http://{cfg['host']}:{cfg['port']}")
+        else:
+            svc.stop()
+            self.statusBar().showMessage("本地 AI 控制服务已停止")
+        cfg = dict(svc.config)
+        cfg["enabled"] = bool(checked)
+        from ..app.local_service import save_service_config
+        save_service_config(cfg)
+
     def closeEvent(self, event):
+        # 关窗口时先停本地控制服务（HTTP 线程），避免残留端口占用。
+        if getattr(self, "_local_service", None) is not None:
+            self._local_service.stop()
         # 关窗口时作写在途加载：worker 回传的结果会被 is_current 判为陈旧丢弃，
         # 避免信号落到已销毁的 widget 上。随后正常关闭。
         self._load_controller.cancel_all()
@@ -1137,8 +1227,17 @@ class MainWindow(QMainWindow):
         self.tileset_tile_props_dock.hide()
         self._central_stack.setCurrentIndex(self._map_page)
         doc = self.state.doc
+        # 老地图 / 早期脚本建的地图里，波次编排节点可能写成 visible=1，
+        # 重开后会在画布左上角冒出几个点。打开时统一归一为隐藏；节点图
+        # 渲染不读 visible，所以节点图里的连线和编辑完全不受影响。
+        if doc is not None:
+            from ..rw.wave_gen import hide_wave_nodes
+            hide_wave_nodes(doc)
         self.scene.set_document(doc)
         self.view.set_document(doc)
+        # 标尺覆盖层随 scene.clear() 销毁，标记也清掉（切工具不清）
+        self._ruler_segments = []
+        self._ruler_pending = None
         self._capture_cache = None      # 切文档后旧层的抓取虚影不能复用
         # set_document 每次新建 show_grid=True 的 grid，这里回写用户开关，
         # 否则「关掉网格 → 切文档」网格会自己回来。
@@ -1346,6 +1445,128 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001 - 位置记录失败不该阻断地图保存
             pass
 
+    def _warn_unknown_units(self, doc):
+        """保存前提示刷兵列表里游戏不存在的单位名（不阻断保存）。
+
+        游戏解析 unitAdd 时若 spawnUnits 含无效单位，会抛 UnitConfigException
+        并把整个触发器丢弃，表现为「波次关联线都连好了但兵一个都不出」。
+        """
+        try:
+            from ..rw.unit_names import unknown_units
+        except Exception:  # noqa: BLE001
+            return
+        bad: dict[str, list[str]] = {}
+        keys = ("spawnUnits", "randomUnits", "unit", "unitType", "unitAdd")
+        for layer in getattr(doc, "layers", ()) or ():
+            for obj in getattr(layer, "objects", ()) or ():
+                props = getattr(obj, "properties", None)
+                if props is None:
+                    continue
+                values = getattr(props, "values", props)
+                for key in keys:
+                    text = values.get(key) if isinstance(values, dict) else None
+                    if not text:
+                        continue
+                    names = unknown_units(str(text))
+                    if names:
+                        label = f"{getattr(obj, 'name', '') or '对象'}#{getattr(obj, 'object_id', '?')}"
+                        for name in names:
+                            bad.setdefault(name, []).append(f"{label}.{key}")
+        if not bad:
+            return
+        detail = "\n".join(
+            f"• {name}  （{', '.join(locs[:4])}{' …' if len(locs) > 4 else ''}）"
+            for name, locs in bad.items())
+        QMessageBox.warning(
+            self, "单位名可能写错",
+            f"以下单位名在游戏单位目录里找不到，游戏会丢弃对应刷兵触发器，兵刷不出来：\n\n"
+            f"{detail}\n\n请检查是否拼错（例如虫王的正确名字是 bugMeleeT31）。\n"
+            f"若来自你另外安装的 mod，可忽略本提示。",
+            QMessageBox.Ok)
+
+    def _prepare_survival_waves(self) -> bool:
+        """保存前：校验波次链 → 编译成原版 survivalWaves 写进 map_info。
+
+        只有地图里存在 waveGen 节点时才动作。链条有问题时弹窗列出断点，
+        让用户选「仍然保存」还是「返回修改」；返回 False 表示取消本次保存。
+        编译写入本身失败不阻断保存（尽力而为），但会在状态栏提示。
+        """
+        doc = self.state.doc
+        if doc is None:
+            return True
+        try:
+            from ..rw.wave_gen import (
+                apply_survival_waves,
+                apply_wave_table,
+                collect_wave_nodes,
+                collect_wave_table_nodes,
+                ensure_attack_points,
+                sync_wave_dispatch_triggers,
+                validate_wave_chain,
+            )
+        except Exception:  # noqa: BLE001
+            return True
+        has_table = bool(collect_wave_table_nodes(doc))
+        has_chain = bool(collect_wave_nodes(doc))
+        if not has_table and not has_chain:
+            return True  # 没有波次节点，普通地图照常保存
+
+        # 游戏只认 name=attack_point 的对象作为出兵点。整合体同步编辑可能
+        # 把名字改掉，导致第一波 TriggerEngine.attackPoints 空列表越界闪退；
+        # 保存前统一纠正，并在状态栏告知用户改了什么。
+        fixed_points = ensure_attack_points(doc)
+
+        # 单位名拼错时 unitAdd 触发器会被游戏整个丢弃（连锁导致波次关联
+        # 报 target not found、虫王之类根本刷不出来）。保存前扫一遍明确提示。
+        self._warn_unknown_units(doc)
+
+        # 官方波次表节点优先：它承载的是用户直接写好的原版文本，最权威；
+        # 存在时直接同步到 map_info，不再跑 waveGen 链的编译（避免互相覆盖）。
+        if has_table:
+            try:
+                text = apply_wave_table(doc)
+                if text:
+                    extra = ""
+                    if fixed_points:
+                        extra = f"；已修复 {fixed_points} 个出兵点名字（游戏只认 attack_point）"
+                    self.statusBar().showMessage(
+                        f"已根据官方波次表节点更新生存波次表（{len(text.splitlines())} 波）{extra}",
+                        4000)
+                elif fixed_points:
+                    self.statusBar().showMessage(
+                        f"已修复 {fixed_points} 个出兵点名字（游戏只认 attack_point）", 4000)
+            except Exception as exc:  # noqa: BLE001
+                self.statusBar().showMessage(f"波次表同步失败（不影响本次保存）：{exc}", 5000)
+            return True
+
+        problems = validate_wave_chain(doc)
+        if problems:
+            detail = "\n".join(f"• {p}" for p in problems)
+            msg = (f"生存波次链有 {len(problems)} 处问题：\n\n{detail}\n\n"
+                   "仍要保存吗？（波次表可能不完整，游戏内倒计时异常）")
+            answer = QMessageBox.warning(
+                self, "波次链校验", msg,
+                QMessageBox.No | QMessageBox.Yes, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return False
+
+        try:
+            text = apply_survival_waves(doc)
+            dispatches = sync_wave_dispatch_triggers(doc)
+            if text:
+                extra = f"，{dispatches} 个波次关联已写成游戏触发器" if dispatches else ""
+                if fixed_points:
+                    extra += f"；已修复 {fixed_points} 个出兵点名字（游戏只认 attack_point）"
+                self.statusBar().showMessage(
+                    f"已根据波次生成器更新生存波次表（{len(text.splitlines())} 波）{extra}",
+                    4000)
+            elif fixed_points:
+                self.statusBar().showMessage(
+                    f"已修复 {fixed_points} 个出兵点名字（游戏只认 attack_point）", 4000)
+        except Exception as exc:  # noqa: BLE001
+            self.statusBar().showMessage(f"波次表编译失败（不影响本次保存）：{exc}", 5000)
+        return True
+
     def _save(self):
         if getattr(self.state, "kind", "map") == "tileset" and \
                 self.state.tileset_doc is not None:
@@ -1361,8 +1582,11 @@ class MainWindow(QMainWindow):
             self._save_as()
             return
         self._flush_graph_positions()
+        if not self._prepare_survival_waves():
+            return
         path = self.state.doc.save()
         self._update_title()
+        self._update_active_tab_title()   # 标签上的文件名 / 未保存星号同步刷新
         self.statusBar().showMessage(f"已保存 {path}")
 
     def _save_as(self):
@@ -1378,6 +1602,8 @@ class MainWindow(QMainWindow):
             return
         target = as_path(path)
         self._flush_graph_positions()
+        if not self._prepare_survival_waves():
+            return
         try:
             result = export_map(
                 self.state.doc, target.parent, self.state.profile,
@@ -1388,6 +1614,7 @@ class MainWindow(QMainWindow):
             return
         self._own_file = True
         self._update_title()
+        self._update_active_tab_title()   # 另存为改了 doc.path，标签名要跟着变
         thumb = result.get("thumbnail", {})
         self.statusBar().showMessage(
             f"已另存 {result['tmx']}  资源 {result['resources']} 项  "
@@ -1870,8 +2097,7 @@ class MainWindow(QMainWindow):
         layer = self.state.current_layer
         name = layer.name if layer is not None else "-"
         self.statusBar().showMessage(
-            f"({col}, {row})  gid={raw}  层={name}  "
-            f"笔刷={self.state.brush_gid}  缩放={int(self._zoom * 100)}%"
+            f"({col}, {row})  gid={raw}  层={name}  笔刷={self.state.brush_gid}"
         )
 
     # ---------------- Tiled 风格「插入对象」工具 ----------------
@@ -1906,6 +2132,8 @@ class MainWindow(QMainWindow):
         # 旧测试 / 探针调用 _set_object_tool("tileselect") 也照常工作。
         tid = canonical_tool_id(tid)
         self._cancel_object_tool()
+        # 分段输入框只在标尺工具下出现（brush/eraser/fill 走下面的早返回分支）
+        self.object_toolbar.set_ruler_controls_visible(tid == "ruler")
         if tid in ("brush", "eraser", "fill"):
             # 瓦片画笔 / 橡皮是同一套瓦片编辑模式，只是笔刷内容不同。
             self.state.tool_id = tid
@@ -2025,9 +2253,57 @@ class MainWindow(QMainWindow):
             values.update(extra)
         return MapObject(**values)
 
+    def _ruler_cell(self, x: float, y: float) -> tuple[int, int] | None:
+        """场景坐标 → 格坐标，越界返回 None。"""
+        doc = self.state.doc
+        if doc is None:
+            return None
+        col, row = int(x // doc.tile_w), int(y // doc.tile_h)
+        return (col, row) if 0 <= col < doc.width and 0 <= row < doc.height else None
+
+    def _sync_ruler(self):
+        """把多段状态与分段数推给覆盖层。"""
+        ruler = self.scene.ruler_overlay()
+        if ruler is None:
+            return
+        ruler.set_segments(self._ruler_segments, self.object_toolbar.segments())
+        ruler.set_pending(self._ruler_pending)
+
+    def _on_ruler_segments_changed(self, *_):
+        self._sync_ruler()
+        if self._ruler_segments:
+            self.statusBar().showMessage(
+                f"标尺：分 {self.object_toolbar.segments()} 段，"
+                f"共 {len(self._ruler_segments)} 段测量")
+
+    def _on_ruler_press(self, x: float, y: float):
+        cell = self._ruler_cell(x, y)
+        if cell is None:
+            return
+        if self._ruler_pending is None:
+            self._ruler_pending = cell
+            self.statusBar().showMessage(f"标尺起点 {cell}，点第二格完成测量")
+        else:
+            seg = (*self._ruler_pending, *cell)
+            self._ruler_segments.append(seg)
+            self._ruler_pending = None
+            from rwmap.view.ruler_overlay import cell_distance
+            dist = cell_distance(*seg)
+            parts = self.object_toolbar.segments()
+            msg = f"标尺：{seg[0]},{seg[1]} → {seg[2]},{seg[3]}，{dist} 格（含两端）"
+            if parts > 1:
+                msg += f"，分 {parts} 段每段 {dist / parts:.1f} 格"
+            if len(self._ruler_segments) > 1:
+                msg += f" · 已标 {len(self._ruler_segments)} 段"
+            self.statusBar().showMessage(msg)
+        self._sync_ruler()
+
     def _on_object_tool_press(self, x: float, y: float):
         tid = self._object_tool
         if tid == "brush":
+            return
+        if tid == "ruler":
+            self._on_ruler_press(x, y)
             return
         if tid == "select":
             # 合并工具要在「没有对象层」的纯瓦片地图上也能用，所以必须排在
@@ -2080,6 +2356,10 @@ class MainWindow(QMainWindow):
             points=[(px - x0, py - y0) for px, py in pts]))
 
     def _on_object_tool_move(self, x: float, y: float):
+        # 标尺是纯点击式：移动鼠标不画预览线。点第一格只留一个点，点第二格
+        # 才连线；否则第三点会被误当成"线又挪位置"。
+        if self._object_tool == "ruler":
+            return
         if self._sel_resize_drag is not None:
             self._do_selection_resize(x, y)
             return
@@ -3488,7 +3768,9 @@ class MainWindow(QMainWindow):
         撤销 / 重做后高亮才不会丢。
         """
         doc = self.state.doc
-        self.trigger_graph_dock.refresh()
+        # 改触发器 / 任意对象后只重建节点图，不重新居中：用户手动调好的
+        # 视角不能被一次属性编辑弹走。需要重新对准时有「适应视图」按钮。
+        self.trigger_graph_dock.refresh(fit=False)
         if doc is not None:
             self._rebind_object_selection(doc)
         self.scene.refresh_objects()
@@ -3522,6 +3804,10 @@ class MainWindow(QMainWindow):
 
     def _on_object_selected(self, obj):
         self.scene.set_selected_object(obj)
+
+    def _on_objects_selected(self, objs):
+        """节点图选中整合体 → 地图画布高亮它代表的全部对象。"""
+        self.scene.set_selected_objects(list(objs or []))
 
     def _object_rect(self, obj) -> QRectF:
         doc = self.state.doc
@@ -4023,7 +4309,17 @@ class MainWindow(QMainWindow):
             + ("（Ctrl+Z 可撤销）" if pushed else "（无变化）"))
 
     def _on_object_right_press(self, x, y):
-        """对象选择类工具下右键弹菜单；钢笔 / 创建工具等走原右键逻辑。"""
+        """对象选择类工具下右键弹菜单；标尺工具右键清空标记。"""
+        if canonical_tool_id(self._object_tool) == "ruler":
+            had = bool(self._ruler_segments or self._ruler_pending)
+            self._ruler_segments = []
+            self._ruler_pending = None
+            ruler = self.scene.ruler_overlay()
+            if ruler is not None:
+                ruler.clear()
+            self.statusBar().showMessage(
+                "已清除标尺标记" if had else "标尺：右键清除标记，左键点两格测距")
+            return
         if canonical_tool_id(self._object_tool) != "select":
             return
         objs = list(self.scene.selected_objects)
@@ -4244,18 +4540,18 @@ class MainWindow(QMainWindow):
                     "请确认图集 firstgid 与官方地形一致")
 
     def _autocrop(self):
-        """自动裁剪：把地图裁到所有图层内容的公共外接矩形（一条撤销可还原）。"""
+        """自动裁剪：按瓦片层内容的 bbox 裁剪，对象层只跟着平移（一条撤销可还原）。"""
         if not self._can_transform():
             self.statusBar().showMessage("当前版本只读，无法裁剪地图")
             return
         from ..commands.layer_command import MapTransformCommand
-        from ..document.layer import ObjectLayer, TileLayer
+        from ..document.layer import TileLayer
         import copy
 
         doc = self.state.doc
         tw, th = doc.tile_w, doc.tile_h
         min_c, min_r, max_c, max_r = doc.width, doc.height, -1, -1
-        # 瓦片层：扫非零格
+        # 只按瓦片层非空格算边界；对象不参与，避免远处对象把地图撑大
         for layer in doc.tile_layers():
             for r in range(doc.height):
                 base = r * doc.width
@@ -4263,14 +4559,6 @@ class MainWindow(QMainWindow):
                     if int(layer.cells[base + c]) & GID_MASK:
                         min_c, max_c = min(min_c, c), max(max_c, c)
                         min_r, max_r = min(min_r, r), max(max_r, r)
-        # 对象层：像素 bbox 换算是 / 向上取整格
-        for layer in doc.layers:
-            if not isinstance(layer, ObjectLayer):
-                continue
-            for obj in layer.objects:
-                x, y, w, h = obj.bounds(tw, th)
-                min_c, max_c = min(min_c, int(x // tw)), max(max_c, -(-int(x + w) // tw) - 1)
-                min_r, max_r = min(min_r, int(y // th)), max(max_r, -(-int(y + h) // th) - 1)
         if max_c < min_c or max_r < min_r:
             self.statusBar().showMessage("地图为空，无需裁剪")
             return

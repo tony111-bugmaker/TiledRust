@@ -47,6 +47,40 @@ class NewMapDialogTest(unittest.TestCase):
         self.assertEqual(len(dlg.values()["tilesets"]), 0)
         dlg.close()
 
+    def test_preview_renders_selected_tileset(self):
+        dlg = NewMapDialog(active_profile())
+        # 构造时默认选中第一项，预览应有实际像素（不是空 QPixmap）
+        pix = dlg.lbl_preview.pixmap()
+        self.assertIsNotNone(pix)
+        self.assertFalse(pix.isNull())
+        self.assertGreater(pix.width(), 0)
+        self.assertGreater(pix.height(), 0)
+        self.assertIn("格", dlg.lbl_preview_info.text())
+        dlg.close()
+
+    def test_preview_toggle_hides_and_restores(self):
+        dlg = NewMapDialog(active_profile())
+        self.assertTrue(dlg.chk_preview.isChecked())
+        dlg.chk_preview.setChecked(False)
+        QApplication.processEvents()
+        self.assertFalse(dlg.lbl_preview.isVisibleTo(dlg))
+        dlg.chk_preview.setChecked(True)
+        QApplication.processEvents()
+        self.assertTrue(dlg.lbl_preview.isVisibleTo(dlg))
+        dlg.close()
+
+    def test_selecting_different_tileset_changes_preview(self):
+        dlg = NewMapDialog(active_profile())
+        if dlg.list_tilesets.count() < 2:
+            self.skipTest("图集不足两项")
+        first = dlg.list_tilesets.item(0).data(Qt.UserRole)
+        dlg.list_tilesets.setCurrentRow(1)
+        QApplication.processEvents()
+        second = dlg.list_tilesets.currentItem().data(Qt.UserRole)
+        self.assertNotEqual(first, second)
+        self.assertIn(second, dlg._preview_cache)
+        dlg.close()
+
     def test_build_new_document_with_tilesets_and_default_tile_size(self):
         dlg = NewMapDialog(active_profile())
         dlg._check_all(False)

@@ -67,9 +67,9 @@ class ToolbarMergeTest(unittest.TestCase):
         ids = [t[0] for t in TOOLS]
         self.assertNotIn("tileselect", ids)
         self.assertIn("select", ids)
-        self.assertEqual(len(ids), 15)          # 原 16 个 → 合并成 15 个
-        self.assertEqual(ids[:5],
-                         ["brush", "pen", "eraser", "fill", "select"])
+        self.assertEqual(len(ids), 16)          # 合并后 15 个 + 标尺
+        self.assertEqual(ids[:6],
+                         ["brush", "pen", "eraser", "fill", "select", "ruler"])
         self.assertEqual(set(self.w.object_toolbar.buttons_by_id), set(ids))
         self.assertEqual(TOOL_EXTRA_SHORTCUTS["select"], ("M",))
 

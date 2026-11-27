@@ -1116,7 +1116,10 @@ class GraphDockTest(unittest.TestCase):
         self.assertEqual(dock.write_positions_to_properties(), 0)
 
     def test_node_pos_property_survives_tmx_roundtrip(self):
-        """位置属性写盘后能被读回：保存→重新读取→属性仍在。"""
+        """布局写进地图根属性（游戏不校验），对象属性里不含 rwmap_node_pos。
+
+        保存 → 重新读取 → 节点位置仍能恢复，且游戏不会报 Key was not used。
+        """
         import tempfile
         from pathlib import Path
         from PySide6.QtCore import QPointF
@@ -1143,7 +1146,10 @@ class GraphDockTest(unittest.TestCase):
         write_document(doc, out)
         try:
             xml = out.read_text(encoding="utf-8")
-            self.assertIn(f'name="{EDITOR_NODE_POS_PROPERTY}"', xml)
+            # 布局写进地图根属性（游戏不校验），不能出现在触发器对象属性里
+            self.assertIn('name="rwmap_layout"', xml)
+            self.assertNotIn(
+                f'<property name="{EDITOR_NODE_POS_PROPERTY}"', xml)
             re_doc = read_document(out, profile)
             re_objs = [o for l in re_doc.layers if isinstance(l, ObjectLayer)
                        for o in l.objects]
@@ -1551,6 +1557,114 @@ class GraphSelectionAndContextMenuTest(unittest.TestCase):
         self.assertEqual(dock._selected_keys, {keys[0]})
         self.assertIn("exec", shown)
         self.assertIn("accepted", shown)
+
+
+class GraphGroupLayoutAndSelectionTest(unittest.TestCase):
+    """分组后的自动布局只算当前组；节点图点选不连带同组对象。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.w = MainWindow(auto_open=False)
+
+    def tearDown(self):
+        self.w.trigger_graph_dock.hide()
+        self.w.act_trigger_graph.setChecked(False)
+        apply_default_layout(self.w)
+
+    def _setup(self, groups=None):
+        from rwmap.document.properties import EDITOR_GROUP_PROPERTY
+        dock = self.w.trigger_graph_dock
+        dock.hide()
+        dock.view.resetTransform()
+        dock._exit_overview()
+        dock.search_edit.clear()
+        dock._empty_groups.clear()
+        doc = make_doc()
+        if groups:
+            for obj, group in zip(doc.layers[0].objects, groups):
+                if group:
+                    obj.properties.set(EDITOR_GROUP_PROPERTY, group)
+        dock.set_document(doc)
+        dock._group_page = ""
+        dock.refresh(fit=False)
+        return dock
+
+    def test_auto_layout_only_current_group_starts_at_origin(self):
+        dock = self._setup(["A", "A", "B", "B"])
+        keys = list(dock.data.nodes)
+        groups = {k: dock.data.nodes[k].group for k in keys}
+        a_keys = [k for k in keys if groups[k] == "A"]
+        b_keys = [k for k in keys if groups[k] == "B"]
+        before_b = {k: (dock.data.nodes[k].x, dock.data.nodes[k].y)
+                    for k in b_keys}
+        dock.set_group_page("A")
+        with patch.object(dock, "fit_view"):
+            dock.auto_layout()
+        pos_a = [(dock.data.nodes[k].x, dock.data.nodes[k].y) for k in a_keys]
+        self.assertEqual(min(x for x, _y in pos_a), 0.0)
+        self.assertEqual(min(y for _x, y in pos_a), 0.0)
+        for key in b_keys:
+            node = dock.data.nodes[key]
+            self.assertEqual((node.x, node.y), before_b[key],
+                             "自动布局不应改动其它组的坐标")
+
+    def test_graph_selection_does_not_pull_in_group_mates(self):
+        dock = self._setup(["A", "A", "A", "A"])
+        keys = list(dock.data.nodes)
+        dock._rebuild_live(set(keys), set(keys), None)
+        dock.scene.clearSelection()
+        dock.node_items[keys[0]].setSelected(True)
+        dock._on_selection_changed()
+        self.assertEqual(dock._selected_keys, {keys[0]})
+
+
+    def test_auto_layout_on_ungrouped_page_leaves_other_group_alone(self):
+        """「选择已有组」= 未分组这一组，不是全部：别的组坐标不能动。"""
+        dock = self._setup([None, None, "A", "A"])
+        keys = list(dock.data.nodes)
+        groups = {k: dock.data.nodes[k].group for k in keys}
+        free = [k for k in keys if not groups[k]]
+        grouped = [k for k in keys if groups[k]]
+        before = {k: (dock.data.nodes[k].x, dock.data.nodes[k].y)
+                  for k in grouped}
+        self.assertEqual(dock._group_page, "")
+        with patch.object(dock, "fit_view"):
+            dock.auto_layout()
+        pos = [(dock.data.nodes[k].x, dock.data.nodes[k].y) for k in free]
+        self.assertEqual(min(x for x, _y in pos), 0.0)
+        self.assertEqual(min(y for _x, y in pos), 0.0)
+        for key in grouped:
+            node = dock.data.nodes[key]
+            self.assertEqual((node.x, node.y), before[key])
+
+    def test_auto_layout_is_one_undoable_step(self):
+        dock = self._setup(["A", "A", None, None])
+        dock.undo_stack = self.w.state.undo_stack
+        dock.set_group_page("A")
+        keys_a = [k for k, n in dock.data.nodes.items() if n.group == "A"]
+        before = {k: (dock.data.nodes[k].x, dock.data.nodes[k].y)
+                  for k in keys_a}
+        depth = dock.undo_stack.count()
+        with patch.object(dock, "fit_view"):
+            dock.auto_layout()
+        self.assertEqual(dock.undo_stack.count(), depth + 1)
+        with patch.object(dock, "fit_view"):
+            dock.undo_stack.undo()
+        for key in keys_a:
+            node = dock.data.nodes[key]
+            self.assertEqual((node.x, node.y), before[key], "撤销应恢复原布局")
+        with patch.object(dock, "fit_view"):
+            dock.undo_stack.redo()
+        pos = [(dock.data.nodes[k].x, dock.data.nodes[k].y) for k in keys_a]
+        self.assertEqual(min(x for x, _y in pos), 0.0)
+        self.assertEqual(min(y for _x, y in pos), 0.0)
+
+    def test_object_edit_does_not_refit_graph_view(self):
+        """改对象后重建节点图，但别把用户调好的视角弹走。"""
+        with patch.object(self.w.trigger_graph_dock, "refresh") as rf:
+            self.w._refresh_objects()
+        rf.assert_called_once_with(fit=False)
 
 
 class GraphEdgeRenderCacheTest(unittest.TestCase):
