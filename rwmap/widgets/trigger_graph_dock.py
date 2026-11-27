@@ -54,7 +54,14 @@ from ..document.properties import (
     WAVE_TABLE_NEXT_PROPERTY, WAVE_GEN_TYPE, WAVE_MARK_PROPERTY,
     WAVE_NAME_PROPERTY, WAVE_TIME_PROPERTY, WAVE_UNITS_PROPERTY,
 )
-from ..rw.wave_gen import is_wave_node, is_wave_table_node, next_wave_name
+from ..rw.wave_gen import (
+    collect_wave_nodes,
+    is_wave_node,
+    is_wave_table_node,
+    next_wave_name,
+    repair_wave_chain,
+    reorder_wave_nodes,
+)
 from ..theme import ASH, INK, PANEL_BORDER_QSS, TEXT, TEXT_DIM, qc
 from .dock_chrome import install_title_bar
 from .trigger_inspector import (
@@ -3000,6 +3007,12 @@ class TriggerGraphDock(QDockWidget):
             act_wave = menu.addAction("在其后插入一波")
             act_wave.triggered.connect(
                 lambda _checked=False, s=src_wave: self._insert_wave_after(s))
+        if self.doc is not None and collect_wave_nodes(self.doc):
+            act_sort = menu.addAction("自动排序波次（按链重新编号）")
+            act_sort.setToolTip(
+                "没有任何前置触发器的波次生成器排第一波，其余按链顺序编号；"
+                "「最终波」等自定义名字保持不变。Ctrl+Z 可撤销")
+            act_sort.triggered.connect(self._auto_reorder_waves)
 
         # 「触发 →」：从选中节点连一条「激活」线到指定目标。比拖端口更好找，
         # 也是用户手绘图里「右键可添加」的诉求。单选时源明确；多选时用第一个
@@ -3022,6 +3035,25 @@ class TriggerGraphDock(QDockWidget):
             f"删除（{count} 个对象）" if count > 1 else "删除")
         act_del.triggered.connect(self._delete_selected_objects)
         return menu
+
+    def _auto_reorder_waves(self):
+        """按链重新编号：没有前置触发器的波次生成器就是第一波。"""
+        if self.doc is None:
+            return
+        layers = self._object_layers()
+        if not layers:
+            return
+        before = capture(layers)
+        changed = reorder_wave_nodes(self.doc)
+        if not changed:
+            self.status.setText("波次编号已按链排好，无需调整")
+            return
+        pushed = push_object_edit(
+            self.doc, self.undo_stack, before,
+            f"自动排序波次（{changed} 个改名）", self._after_object_change)
+        if not pushed:
+            self._after_object_change()
+        self.status.setText(f"已按链重排 {changed} 个波次编号（Ctrl+Z 可撤销）")
 
     # ---------------- 整合体：多个同配置对象折叠成一个节点 ----------------
     def _object_layers(self):
@@ -3147,6 +3179,7 @@ class TriggerGraphDock(QDockWidget):
 
         - 名字自动生成「第N波」（顶上显示的标题），同时同步到私有波次名属性；
         - 旧的后继接到新波次之后（src → new → old_next），保持链连贯；
+        - 新波次继承**被右键那个节点**的分组（rwmap_group），不再落回默认组；
         - 新节点放在 src 右侧一个节点间距，visible=false（地图画布不显示）；
         - 整批只占一条撤销记录，插入后选中新节点方便马上填时间 / 刷兵。
         """
@@ -3187,6 +3220,11 @@ class TriggerGraphDock(QDockWidget):
         props.set(WAVE_NAME_PROPERTY, name, "string")
         props.set(WAVE_TIME_PROPERTY, "", "string")
         props.set(WAVE_UNITS_PROPERTY, "", "string")
+        # 分组跟着「按下的那个波次生成器」走：在组页面里连续插波时，
+        # 新节点应留在当前组，而不是掉回默认组后从视野里消失。
+        src_group = str(node.obj.properties.get(EDITOR_GROUP_PROPERTY) or "").strip()
+        if src_group:
+            props.set(EDITOR_GROUP_PROPERTY, src_group, "string")
         if old_next:
             props.set(WAVE_NEXT_PROPERTY, old_next, "string")
         # 位置写进私有属性（在快照之后、提交之前，纳入撤销）；保存时还会被
@@ -3273,6 +3311,14 @@ class TriggerGraphDock(QDockWidget):
         if not layers:
             self.status.setText("找不到这些对象所属的对象层，未删除")
             return
+        # 波次节点删除前先记下它指向的下一波：删完把前驱接回后继，
+        # 再按链重新编号，避免留下一堆悬空 next 和断掉的编号。
+        all_uids = {uid for uids in targets.values() for uid in uids}
+        deleted_waves = {
+            n.ident: (n.next_refs[0] if n.next_refs else "")
+            for n in collect_wave_nodes(self.doc)
+            if object_uid(n.obj) in all_uids
+        }
         before = capture(layers)
         for layer in layers:
             uids = targets[id(layer)]
@@ -3280,6 +3326,9 @@ class TriggerGraphDock(QDockWidget):
                              if object_uid(o) not in uids]
             layer.dirty = True
         self.doc.dirty = True
+        if deleted_waves:
+            repair_wave_chain(self.doc, set(deleted_waves), deleted_waves)
+            reorder_wave_nodes(self.doc)
         # 重建前丢掉选中态，否则已删掉的 key 会作为「已选」写回新节点。
         self._selected_keys.clear()
         self._clear_detail(reset=True)
@@ -3751,8 +3800,16 @@ class TriggerGraphDock(QDockWidget):
         if target is None:
             return
         layer, idx = target
+        deleted_waves = {
+            n.ident: (n.next_refs[0] if n.next_refs else "")
+            for n in collect_wave_nodes(self.doc)
+            if object_uid(n.obj) == uid
+        }
         before = snapshot(layer)
         layer.objects = [o for i, o in enumerate(layer.objects) if i != idx]
+        if deleted_waves:
+            repair_wave_chain(self.doc, set(deleted_waves), deleted_waves)
+            reorder_wave_nodes(self.doc)
         after = snapshot(layer)
         layer.dirty = True
         self.doc.dirty = True

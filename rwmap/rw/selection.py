@@ -50,7 +50,12 @@ def moved_rect(rect, dx, dy):
 
 def read_selection(layer, sel):
     col0, row0, cols, rows = sel
-    return [[layer.get(col0 + c, row0 + r) for c in range(cols)]
+    # TileLayer.cells 是定长一维表，get() 不查边界：负索引绕回表尾、
+    # 正越界 IndexError。地图外拖框 / 撤销恢复的旧选区都可能越界，
+    # 越界格一律当空格 0（与 main_window._capture_cells 一致）。
+    return [[layer.get(col0 + c, row0 + r)
+             if layer.in_bounds(col0 + c, row0 + r) else 0
+             for c in range(cols)]
             for r in range(rows)]
 
 

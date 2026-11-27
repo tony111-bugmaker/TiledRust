@@ -34,10 +34,10 @@ class PanelSettingsTest(unittest.TestCase):
         apply_default_layout(self.w)
 
     # ---- 菜单 ----
-    def test_menu_bar_has_settings_as_fifth_menu(self):
+    def test_menu_bar_has_settings_as_last_menu(self):
         actions = self.w.menuBar().actions()
         self.assertEqual([a.text() for a in actions],
-                         ["文件", "编辑", "视图", "地图", "工具", "设置"])
+                         ["文件", "编辑", "视图", "地图", "设置"])
 
     def test_settings_menu_items(self):
         menu = self.w.menuBar().actions()[-1].menu()

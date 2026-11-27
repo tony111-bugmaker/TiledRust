@@ -28,6 +28,7 @@ from ..document.layer import ObjectLayer, TileLayer
 from ..document.map_object import SHAPE_LABELS, MapObject, object_uid
 from ..document.tileset_document import TilesetDocument
 from ..io.template_reader import read_template_object
+from ..widgets.copy_group_dialog import ask_copy_group_name
 from ..rw.automapping import AutoMapper, normalize_marker_gid
 from ..rw.exporter import export_map
 from ..rw.rwmod_pack import pack_rwmod
@@ -46,7 +47,7 @@ from ..view import MapScene, MapView
 from ..widgets import (
     LayersDock, ObjectToolBar, PanelSettingsDialog, ProbeWindow,
     PropertiesDock, TilesetPropsDock, TilesetTilePropsDock, TilesetsDock,
-    TriggerGraphDock, UnitGalleryDialog, install_dock_tab_detach,
+    TriggerGraphDock, install_dock_tab_detach,
 )
 from ..widgets.minimap import MiniMapDock
 from ..widgets.new_tileset_dialog import NewTilesetDialog
@@ -142,6 +143,11 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
         self._sel_rect = None
         self._tile_selection = None
         self._tile_clipboard = None
+        # ---- 对象复制粘贴：副本吸附鼠标，左键放置 ----
+        self._paste_clones: list = []   # 模板对象（坐标已减掉锚点）
+        self._paste_meta: dict = {}     # is_group / group_name / layers
+        self._paste_anchor = (0.0, 0.0)
+        self._paste_right_xy = (0.0, 0.0)
         self._sel_dragging = False
         self._sel_moving = False
         self._sel_start = (0.0, 0.0)
@@ -533,11 +539,6 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
             "以独立窗口打开 Triggers 对象层的只读节点图（矩形 / 点 / 线等全部对象）")
         self.act_trigger_graph.triggered.connect(self._toggle_trigger_graph)
 
-        # 单位图鉴：只读浏览游戏本体的单位外观 / 中文名 / 贴图，独立窗口。
-        self.act_unit_gallery = QAction("单位图鉴", self)
-        self.act_unit_gallery.setToolTip("浏览游戏单位的拼装外观、官方中文名、属性与贴图部件")
-        self.act_unit_gallery.triggered.connect(self._open_unit_gallery)
-
         file_menu = self.menuBar().addMenu("文件")
         # Tiled 式「新建」置顶子菜单：点开先选新建地图 / 新建瓦片图集。
         new_menu = file_menu.addMenu("新建")
@@ -589,9 +590,7 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
         map_menu.addAction(self.act_next_tileset)
         map_menu.addSeparator()
         map_menu.addAction(self.act_map_properties)
-        tools_menu = self.menuBar().addMenu("工具")
-        tools_menu.addAction(self.act_unit_gallery)
-
+        # 「工具」顶级菜单和「单位图鉴」入口都按用户要求去掉。
         settings_menu = self.menuBar().addMenu("设置")
         settings_menu.addAction(self.act_local_service)
         settings_menu.addSeparator()
@@ -812,17 +811,6 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
             msg += "；" + "；".join(report["warnings"])
         self.statusBar().showMessage(msg)
 
-    # ---------------- 工具：单位图鉴（独立窗口） ----------------
-    def _open_unit_gallery(self):
-        dlg = getattr(self, "_unit_gallery_dlg", None)
-        if dlg is None:
-            dlg = UnitGalleryDialog(self)
-            self._unit_gallery_dlg = dlg
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
-        self.statusBar().showMessage("单位图鉴：多部件单位按游戏 ini 坐标拼成完整外观")
-
     # ---------------- 设置：触发器节点图（独立窗口） ----------------
     def _toggle_trigger_graph(self, checked: bool):
         dock = self.trigger_graph_dock
@@ -921,6 +909,9 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
         self.view.objectToolRightMoved.connect(self._pen_right_move)
         self.view.objectToolRightReleased.connect(self._pen_right_release)
         self.view.objectToolRightPressed.connect(self._on_object_right_press)
+        self.view.pasteMoveRequested.connect(self._on_paste_move)
+        self.view.pastePlaceRequested.connect(self._on_paste_place)
+        self.view.pasteCancelRequested.connect(self._cancel_object_paste)
         self.view.zoomChanged.connect(self._on_zoom)
 
         self.object_toolbar.toolChanged.connect(self._set_object_tool)
@@ -2132,6 +2123,7 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
         # 旧测试 / 探针调用 _set_object_tool("tileselect") 也照常工作。
         tid = canonical_tool_id(tid)
         self._cancel_object_tool()
+        self._cancel_object_paste(silent=True)   # 切工具时收起吸附中的副本
         # 分段输入框只在标尺工具下出现（brush/eraser/fill 走下面的早返回分支）
         self.object_toolbar.set_ruler_controls_visible(tid == "ruler")
         if tid in ("brush", "eraser", "fill"):
@@ -2887,7 +2879,22 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
         # 视口坐标先被取整再映射回场景：留 1 屏幕像素的容差，
         # 否则缩放到 126% 后拖到格线上会多选一行 / 一列。
         eps = min(1.0 / scale + 1e-6, 0.4 * min(doc.tile_w, doc.tile_h))
-        return cells_from_rect(rect, doc.tile_w, doc.tile_h, boundary_eps=eps)
+        col0, row0, cols, rows = cells_from_rect(
+            rect, doc.tile_w, doc.tile_h, boundary_eps=eps)
+        # 选区必须落在地图内：从地图外拖框时 col0/row0 可能是负数，右/下
+        # 边界也可能超出地图。不钳制的话，_read_selection 的 layer.get()
+        # 正越界会 IndexError（崩溃）、负索引会静默绕回表尾（读错瓦片）。
+        # 在源头钳一次，复制 / 移动 / 粘贴 / 选框显示全都跟着安全。
+        c1 = min(col0 + cols, doc.width)
+        r1 = min(row0 + rows, doc.height)
+        col0, row0 = max(col0, 0), max(row0, 0)
+        cols, rows = max(c1 - col0, 0), max(r1 - row0, 0)
+        if cols <= 0 or rows <= 0:
+            # 整框都在地图外：退化为地图角落的 1 格，不产生空/负选区。
+            col0 = min(col0, max(doc.width - 1, 0))
+            row0 = min(row0, max(doc.height - 1, 0))
+            cols = rows = 1
+        return (col0, row0, cols, rows)
 
     def _cells_to_rect(self, sel):
         doc = self.state.doc
@@ -2943,7 +2950,12 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
 
     def _read_selection(self, layer, sel):
         col0, row0, cols, rows = sel
-        return [[layer.get(col0 + c, row0 + r) for c in range(cols)]
+        # 与 _capture_cells 同样的边界兜底：TileLayer.cells 是定长一维表，
+        # get() 不查边界，负索引绕回表尾、正越界 IndexError。选区已在
+        # _rect_to_cells 钳制，这里再兜一层，防历史文档 / 程序化设置的越界 sel。
+        return [[layer.get(col0 + c, row0 + r)
+                 if layer.in_bounds(col0 + c, row0 + r) else 0
+                 for c in range(cols)]
                 for r in range(rows)]
 
     def _compute_move_changes(self, layer, sel, dc, dr):
@@ -4329,6 +4341,7 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
             objs = list(self.scene.selected_objects)
         elif not objs:
             return
+        self._paste_right_xy = (x, y)   # 复制后以右键点为吸附锚点
         self._show_object_context_menu(x, y)
 
     def _build_object_context_menu(self):
@@ -4341,6 +4354,8 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
             (o.properties.get(EDITOR_GROUP_PROPERTY) if o.properties else None)
             for o in objs)
         menu = QMenu(self)
+        menu.addAction("复制（吸附鼠标）", self._copy_objects_for_paste)
+        menu.addSeparator()
         if len(objs) >= 2:
             menu.addAction("组合", self._group_selected_objects)
             if has_group:
@@ -4366,6 +4381,191 @@ class MainWindow(LocalServiceActionsMixin, QMainWindow):
         menu.addSeparator()
         menu.addAction("删除选中对象", self._delete_selected_object)
         return menu
+
+    # ---------------- 对象复制：吸附鼠标粘贴 ----------------
+    def _copy_objects_for_paste(self):
+        """把选区做成副本并吸附到鼠标：整组 / 单对象 / 框选区域都支持。
+
+        属性（含 rwmap_group / rwmap_merge_group 等隐藏属性）原样保留；整合体
+        的内部关系在粘贴时才换成新 gid，避免副本和原件意外绑在同一个整合体。
+
+        来源组名只在这里记录，真正弹窗放到左键按下放置时；每个来源组依次问一次。
+        """
+        from copy import copy, deepcopy
+        from ..document.properties import EDITOR_GROUP_PROPERTY
+
+        objs = list(self.scene.selected_objects)
+        if not objs or self.state.doc is None:
+            return
+
+        # 选区覆盖某组的全部成员 → 按「整组复制」
+        is_group, group_name = False, ""
+        groups = {(o.properties.get(EDITOR_GROUP_PROPERTY) or "")
+                  for o in objs if o.properties is not None}
+        groups.discard("")
+        if len(groups) == 1:
+            g = next(iter(groups))
+            members = [o for layer in self.state.doc.layers
+                       if hasattr(layer, "objects") for o in layer.objects
+                       if o.properties is not None
+                       and (o.properties.get(EDITOR_GROUP_PROPERTY) or "") == g]
+            chosen = {self._obj_key(o) for o in objs}
+            if members and all(self._obj_key(m) in chosen for m in members):
+                is_group, group_name = True, g
+                objs = members
+
+        # 按选中顺序去重：框选里混了多个组时，放置时逐个组依次弹窗。
+        group_names = list(dict.fromkeys(
+            (o.properties.get(EDITOR_GROUP_PROPERTY) or "")
+            for o in objs if o.properties is not None))
+        group_names = [g for g in group_names if g]
+
+        ax, ay = self._paste_right_xy
+        templates: list = []
+        layers: list = []
+        for obj in objs:
+            clone = copy(obj)
+            clone.xml_element = None      # 复用原 DOM 会覆盖原对象
+            clone.points = [tuple(p) for p in obj.points]
+            clone.text_style = dict(obj.text_style)
+            clone.properties = deepcopy(obj.properties)
+            clone.x -= ax
+            clone.y -= ay
+            templates.append(clone)
+            layers.append(next(iter(self._layers_of_objects([obj]) or [None]), None))
+
+        self._paste_clones = templates
+        self._paste_meta = {
+            "is_group": is_group, "group_name": group_name,
+            "group_names": group_names, "layers": layers}
+        self._paste_anchor = (ax, ay)
+        self.view.paste_mode = True
+        self.view.setCursor(Qt.CrossCursor)
+        # 静态选中框留在原对象上会和虚影形成两层框，粘贴期间只显示虚影。
+        self.scene.set_paste_selection_hidden(True)
+        self._update_paste_preview(ax, ay)
+        label = f"整组「{group_name}」" if is_group else f"{len(templates)} 个对象"
+        self.statusBar().showMessage(
+            f"已复制{label}：左键放置，Shift 连续粘贴，Ctrl 并入原组，右键 / Esc 取消")
+
+    @staticmethod
+    def _obj_key(obj):
+        from rwmap.document.map_object import object_uid
+        return object_uid(obj)
+
+    def _on_paste_move(self, x, y):
+        self._update_paste_preview(x, y)
+
+    def _update_paste_preview(self, x, y):
+        if not self._paste_clones:
+            return
+        # 模板坐标已减掉锚点，直接加鼠标位置：锚点就是鼠标「抓住」的那一点
+        dx, dy = x, y
+        doc = self.state.doc
+        tw = doc.tile_w if doc is not None else 20
+        th = doc.tile_h if doc is not None else 20
+        rects = []
+        for t in self._paste_clones:
+            bx, by, bw, bh = t.bounds(tw, th)
+            rects.append((bx + dx, by + dy, bw, bh))
+        self.scene.set_paste_preview(rects)
+
+    def _on_paste_place(self, x, y, modifiers):
+        if not self._paste_clones or self.state.doc is None:
+            self._cancel_object_paste()
+            return
+        from copy import copy, deepcopy
+        import time
+        from ..document.properties import (
+            EDITOR_GROUP_PROPERTY, MERGE_GROUP_PROPERTY)
+        from ..commands.object_command import capture, push_object_edit
+
+        meta = self._paste_meta
+        # 左键按下（放置）时才逐组弹命名窗口；按住 Ctrl 则直接并入原来的组。
+        from ..widgets.copy_group_dialog import CANCEL, KEEP_ORIGINAL
+        group_names = list(meta.get("group_names") or [])
+        if modifiers & Qt.ControlModifier:
+            group_map = {g: g for g in group_names}
+        else:
+            group_map = {}
+            for g in group_names:
+                action, new_name = ask_copy_group_name(self, g)
+                if action == CANCEL:
+                    return          # 取消：本次不放置，仍保持粘贴模式
+                group_map[g] = g if action == KEEP_ORIGINAL else (new_name or g)
+
+        # 模板已减掉锚点，鼠标位置即新锚点
+        dx, dy = x, y
+        # 每次粘贴给副本一套新的整合体 gid：副本之间仍是同一整合体，
+        # 但不会和原件（或上一次粘贴的副本）串到一起。
+        gid_map: dict[str, str] = {}
+        for t in self._paste_clones:
+            old = str(t.properties.get(MERGE_GROUP_PROPERTY) or "")
+            if old and old not in gid_map:
+                gid_map[old] = f"m{time.time_ns()}_{len(gid_map)}"
+
+        layers = [l for l in meta.get("layers", []) if l is not None]
+        if not layers:
+            self._cancel_object_paste()
+            return
+        before = capture(layers)
+        # push_object_edit 会用 after 快照整层替换 objects，粘贴进来的实例会被
+        # 换成快照副本；记下追加起点，push 后据此找回真正留在文档里的对象。
+        base_len = {id(layer): len(layer.objects) for layer in layers}
+        next_id = self._new_object_id()
+        placed = []
+        for template, layer in zip(self._paste_clones, meta.get("layers", [])):
+            if layer is None:
+                continue
+            obj = copy(template)
+            obj.object_id = next_id
+            next_id += 1
+            obj.xml_element = None
+            obj.points = [tuple(p) for p in template.points]
+            obj.text_style = dict(template.text_style)
+            obj.properties = deepcopy(template.properties)
+            obj.x += dx
+            obj.y += dy
+            old_group = str(obj.properties.get(EDITOR_GROUP_PROPERTY) or "")
+            if old_group in group_map:
+                obj.properties.set(
+                    EDITOR_GROUP_PROPERTY, group_map[old_group], "string")
+            old_gid = str(obj.properties.get(MERGE_GROUP_PROPERTY) or "")
+            if old_gid in gid_map:
+                obj.properties.set(MERGE_GROUP_PROPERTY, gid_map[old_gid], "string")
+            layer.objects.append(obj)
+            placed.append(obj)
+        for layer in layers:
+            layer.dirty = True
+        self.state.doc.dirty = True
+        pushed = push_object_edit(
+            self.state.doc, self.state.undo_stack, before,
+            f"粘贴 {len(placed)} 个对象", self._refresh_objects)
+        if not pushed:
+            self._refresh_objects()
+        fresh = [o for layer in layers
+                 for o in layer.objects[base_len[id(layer)]:]]
+        self.scene.set_selected_objects(fresh)
+        if modifiers & Qt.ShiftModifier:
+            self._update_paste_preview(x, y)
+            self.statusBar().showMessage(
+                f"已粘贴 {len(placed)} 个对象：继续左键放置，右键 / Esc 结束")
+        else:
+            self._cancel_object_paste(silent=True)
+            self.statusBar().showMessage(
+                f"已粘贴 {len(placed)} 个对象（Ctrl+Z 可撤销）")
+
+    def _cancel_object_paste(self, silent: bool = False):
+        if not self._paste_clones:
+            return
+        self._paste_clones = []
+        self._paste_meta = {}
+        self.view.paste_mode = False
+        self.scene.clear_paste_preview()
+        self.scene.set_paste_selection_hidden(False)
+        self.view.unsetCursor()
+        if not silent:
+            self.statusBar().showMessage("已取消对象复制")
 
     def _show_object_context_menu(self, x, y):
         menu = self._build_object_context_menu()

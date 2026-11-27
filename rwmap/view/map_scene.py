@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsRectItem
 
 from ..document.gid import split_gid
@@ -570,6 +570,37 @@ class TileStampPreviewItem(QGraphicsItem):
             painter.restore()
 
 
+class PastePreviewItem(QGraphicsItem):
+    """复制粘贴时跟随鼠标的半透明轮廓（只画形状，不进文档 / 撤销栈）。"""
+
+    def __init__(self):
+        super().__init__()
+        self._rects: list[tuple[float, float, float, float]] = []
+        self.setZValue(10000)
+        self._pen = QPen(QColor(SELECT), 2.0, Qt.DashLine)
+        self._brush = QBrush(QColor(SELECT_FILL))
+
+    def set_shapes(self, rects):
+        self.prepareGeometryChange()
+        self._rects = [(float(x), float(y), float(w), float(h))
+                       for x, y, w, h in rects]
+
+    def boundingRect(self) -> QRectF:
+        if not self._rects:
+            return QRectF()
+        x0 = min(r[0] for r in self._rects)
+        y0 = min(r[1] for r in self._rects)
+        x1 = max(r[0] + r[2] for r in self._rects)
+        y1 = max(r[1] + r[3] for r in self._rects)
+        return QRectF(x0 - 4, y0 - 4, x1 - x0 + 8, y1 - y0 + 8)
+
+    def paint(self, painter, option, widget=None):
+        painter.setPen(self._pen)
+        painter.setBrush(self._brush)
+        for x, y, w, h in self._rects:
+            painter.drawRect(QRectF(x, y, w, h))
+
+
 class MapScene(QGraphicsScene):
     # 选中对象集合变化（set_selected_objects 里 emit），供主窗口刷新变换按钮启用态。
     objectSelectionChanged = Signal(object)
@@ -585,6 +616,9 @@ class MapScene(QGraphicsScene):
         self._obj_sel_box = None       # 对象选中包围框（含全部选中对象的整体外接矩形）
         self._stamp_preview = None
         self._pen_preview = None
+        self._paste_preview: PastePreviewItem | None = None
+        # 对象复制粘贴期间隐藏静态选中框，只留跟随鼠标的虚影；不清除选中数据。
+        self._paste_selection_hidden = False
         self._ruler = None            # 标尺覆盖层（切工具不消失，右键才清）
         # ---- 纯视图显示开关（不写文档，不进撤销栈，不进 TMX） ----
         # current_layer 是「编辑语义」的当前层（只能是 TileLayer，map_view 靠它
@@ -624,6 +658,8 @@ class MapScene(QGraphicsScene):
         self.doc = doc
         self._stamp_preview = None
         self._pen_preview = None      # clear() 会销毁 item，引用必须一并清空
+        self._paste_preview = None    # 复制粘贴虚影同样随 clear() 销毁
+        self._paste_selection_hidden = False
         self._ruler = None            # 标尺覆盖层同样随 scene.clear() 销毁
         # clear() 会销毁场景里所有 item（包括下面的选框），Python 引用必须一并清空，
         # 否则下次 set_selection_rect/set_object_selection_box 会访问已删除的 C++ 对象。
@@ -706,6 +742,35 @@ class MapScene(QGraphicsScene):
         for item in self.layer_items.values():
             if isinstance(item, ObjectLayerItem):
                 item.set_preview(obj)
+
+    def set_paste_preview(self, rects):
+        """复制粘贴的虚影：rects 为 (x, y, w, h) 场景坐标列表。"""
+        if self._paste_preview is None:
+            self._paste_preview = PastePreviewItem()
+            self.addItem(self._paste_preview)
+        self._paste_preview.set_shapes(rects)
+        self._paste_preview.setVisible(bool(rects))
+
+    def clear_paste_preview(self):
+        if self._paste_preview is not None:
+            self._paste_preview.set_shapes([])
+            self._paste_preview.setVisible(False)
+
+    def set_paste_selection_hidden(self, hidden: bool):
+        """粘贴期间隐藏「静态」对象选中框（浅蓝虚线 + 黄色手柄）。
+
+        只动视图：选中对象列表保留，属性面板 / 删除 / 变换仍作用于原件；
+        退出粘贴模式时按当前选中集合恢复，这样 Shift 连粘后框会落在副本上。
+        """
+        self._paste_selection_hidden = bool(hidden)
+        if self._obj_sel_box is None:
+            return
+        rect = self._selection_combined_bounds()
+        if hidden or rect is None:
+            self._obj_sel_box.setVisible(False)
+        else:
+            self._obj_sel_box.setRect(rect)
+            self._obj_sel_box.setVisible(True)
 
     def refresh_object_rects(self, layer, rects, objects=None):
         item = self.layer_items.get(id(layer))
@@ -866,7 +931,8 @@ class MapScene(QGraphicsScene):
                            for o in self._selected)
         self._obj_sel_box.set_show_handles(show_handles)
         self._obj_sel_box.setRect(rect)
-        self._obj_sel_box.setVisible(True)
+        # 复制粘贴时静态框会留在原对象上、与跟随鼠标的虚影形成两层框，隐藏它。
+        self._obj_sel_box.setVisible(not self._paste_selection_hidden)
 
     def refresh_selection_handles_scale(self, scale: float):
         """视图缩放变化时同步箭头尺寸（缩放是视图操作，不该进撤销栈）。"""

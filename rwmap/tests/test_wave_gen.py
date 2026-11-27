@@ -138,6 +138,47 @@ class ValidateTest(unittest.TestCase):
         self.assertTrue(any("找不到" in p for p in problems), problems)
 
 
+class ReorderTest(unittest.TestCase):
+    """按链自动排序：无前置触发器者为第一波，删除后接回断链并重编号。"""
+
+    def test_reorder_by_chain_not_by_name(self):
+        # 入口叫「第三波」也不能当第三波：链决定顺序，名字只是编号
+        a = wave_obj(1, "第三波", next_="第二波", ident="w3")
+        b = wave_obj(2, "第二波", next_="第一波", ident="w2")
+        c = wave_obj(3, "第一波", ident="w1")
+        doc = doc_of(a, b, c)
+        self.assertEqual(wg.validate_wave_chain(doc), [])
+        # 中间的「第二波」本来就在正确位置，只需改首尾两个
+        self.assertEqual(wg.reorder_wave_nodes(doc), 2)
+        self.assertEqual(
+            [n.name for n in wg._chain_order(wg.collect_wave_nodes(doc))],
+            ["第一波", "第二波", "第三波"])
+        # 改名后 next 引用同步修正，链仍然完整
+        self.assertEqual(wg.validate_wave_chain(doc), [])
+
+    def test_custom_wave_name_kept(self):
+        a = wave_obj(1, "最终波", ident="f")
+        b = wave_obj(2, "第一波", next_="最终波", ident="w1")
+        doc = doc_of(a, b)
+        wg.reorder_wave_nodes(doc)
+        self.assertIn("最终波", {o.name for o in doc.layers[0].objects})
+
+    def test_repair_after_delete_then_renumber(self):
+        a = wave_obj(1, "第一波", next_="第二波")
+        b = wave_obj(2, "第二波", next_="第三波")
+        c = wave_obj(3, "第三波")
+        doc = doc_of(a, b, c)
+        self.assertEqual(wg.repair_wave_chain(doc, {"第二波"},
+                                              {"第二波": "第三波"}), 1)
+        self.assertEqual(a.properties.get(WAVE_NEXT_PROPERTY), "第三波")
+        doc.layers[0].objects.remove(b)
+        wg.reorder_wave_nodes(doc)
+        self.assertEqual(
+            [n.name for n in wg._chain_order(wg.collect_wave_nodes(doc))],
+            ["第一波", "第二波"])
+        self.assertEqual(wg.validate_wave_chain(doc), [])
+
+
 class CompileTest(unittest.TestCase):
     def test_time_formats(self):
         self.assertEqual(wg._parse_time("0:10"), "0:10")
@@ -151,6 +192,17 @@ class CompileTest(unittest.TestCase):
                          "6 bugMelee,2 heavyTank")
         self.assertEqual(wg._parse_units("bugMelee*6,heavyTank*2"),
                          "6 bugMelee,2 heavyTank")
+
+    def test_bare_unit_name_gets_count(self):
+        # 游戏不接受裸单位名：第一波 "bugMeleeT31" 会让整张地图加载失败，
+        # 编译器必须补成 "1 bugMeleeT31"（其他波次本来就带数量）。
+        self.assertEqual(wg._parse_units("bugMeleeT31"), "1 bugMeleeT31")
+        self.assertEqual(
+            wg._parse_units("10 experimentalHoverTank,bugMeleeT31"),
+            "10 experimentalHoverTank,1 bugMeleeT31")
+        a = wave_obj(1, "第一波", time="10:00", units="bugMeleeT31")
+        self.assertEqual(wg.compile_line(wg.WaveNode(a, "1")),
+                         "+10:00 第一波 - 1 bugMeleeT31")
 
     def test_compile_chain_order(self):
         a = wave_obj(1, "第一波", time="0:10", units="6 bugMelee,2 heavyTank", next_="第二波")
@@ -283,6 +335,8 @@ class WriteRoundtripTest(unittest.TestCase):
         from rwmap.io.tmx_writer import write_document
 
         src = Path(self.SRC)
+        if not src.exists():
+            self.skipTest("示例地图缺失")   # 开源版里路径已脱敏成占位符
         doc = read_document(src)
         layer = next(l for l in doc.layers if getattr(l, "kind", "") == "object")
         layer.objects[:] = [o for o in layer.objects if not wg.is_wave_node(o)]

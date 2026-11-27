@@ -175,6 +175,26 @@ class TileSelectIntegrationTest(unittest.TestCase):
         self.assertEqual(self.layer.get(9, 9), 6)
         self.assertEqual(self.layer.get(0, 0), 0)
 
+    def test_box_select_outside_map_is_clamped_and_move_safe(self):
+        """从地图外拖框建立越界选区，再移动不能 IndexError（用户崩溃链）。
+
+        截图堆栈：框选 → 在选区内按下拖动 → _move_selection →
+        _read_selection → layer.get 越界。根因是 _rect_to_cells 未钳制。
+        """
+        w = self.w
+        w._set_object_tool("tileselect")
+        # 从地图右下角外 (180,180) 拖到 (260,260)：地图只有 200x200 像素。
+        w.view.objectToolPressed.emit(180.0, 180.0)
+        w.view.objectToolMoved.emit(260.0, 260.0)
+        w.view.objectToolReleased.emit(260.0, 260.0)
+        # 选区被钳到地图右下角 1 格，不是越界的 (9,9,4,4)。
+        self.assertEqual(w._tile_selection, (9, 9, 1, 1))
+        # 在选区内再次按下并拖动：修复前这一步抛 IndexError。
+        w.view.objectToolPressed.emit(190.0, 190.0)
+        w.view.objectToolMoved.emit(210.0, 210.0)
+        w.view.objectToolReleased.emit(210.0, 210.0)
+        self.assertEqual(w._tile_selection, (9, 9, 1, 1))
+
     def test_real_mouse_events_at_non_100_percent_zoom(self):
         """走完整 QMouseEvent → mapToScene 链路，缩放也不会放大位移。
 

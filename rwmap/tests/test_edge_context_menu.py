@@ -223,6 +223,10 @@ class WaveChainRightClickTest(unittest.TestCase):
         waves = [o for o in dock.doc.layers[0].objects if o.name in ("第一波", "第二波")]
         self.assertEqual(len(waves), 2)
         self.assertFalse(any(o.name == "第三波" for o in dock.doc.layers[0].objects))
+        # 源节点没分组时，新波次也不该凭空进组。
+        from rwmap.document.properties import EDITOR_GROUP_PROPERTY
+        new_obj = next(o for o in waves if o.name == "第二波")
+        self.assertIsNone(new_obj.properties.get(EDITOR_GROUP_PROPERTY))
 
         # 链完整、第二波已接入；新波次刷兵列表为空，按设计不编译进
         # survivalWaves（避免游戏解析空行），所以文本只含填了刷兵的第一波。
@@ -231,6 +235,20 @@ class WaveChainRightClickTest(unittest.TestCase):
         text = compile_survival_waves(dock.doc)
         self.assertIn("第一波", text)
         self.assertNotIn("第二波", text)
+
+    def test_insert_wave_joins_clicked_nodes_group(self):
+        """在分组里的波次上右键插波：新对象应留在同一组，不掉回默认组。"""
+        from rwmap.document.properties import EDITOR_GROUP_PROPERTY
+        dock = self._setup()
+        w1 = next(n for n in dock.data.nodes.values() if n.obj.name == "第一波")
+        w1.obj.properties.set(EDITOR_GROUP_PROPERTY, "B组")
+        dock.select_objects([w1.obj])
+        act = next(a for a in dock.node_context_menu().actions()
+                   if a.text() == "在其后插入一波")
+        act.trigger()
+        new_obj = next(o for o in dock.doc.layers[0].objects
+                       if o.name == "第二波")
+        self.assertEqual(new_obj.properties.get(EDITOR_GROUP_PROPERTY), "B组")
 
     def test_insert_second_time_gives_third_wave(self):
         dock = self._setup()

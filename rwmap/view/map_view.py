@@ -39,9 +39,14 @@ class MapView(QGraphicsView):
     objectToolRightPressed = Signal(float, float)
     objectToolRightMoved = Signal(float, float)
     objectToolRightReleased = Signal(float, float)
+    # 复制粘贴：对象吸附在鼠标上，左键放置 / 右键或 Esc 取消
+    pasteMoveRequested = Signal(float, float)
+    pastePlaceRequested = Signal(float, float, object)  # x, y, Qt.KeyboardModifiers
+    pasteCancelRequested = Signal()
 
     def __init__(self, scene=None, parent=None):
         super().__init__(scene, parent)
+        self.paste_mode = False   # 复制品跟随鼠标，等待左键放置
         self.camera = Camera()
         self._panning = False
         self._last_pos = None
@@ -193,6 +198,16 @@ class MapView(QGraphicsView):
     # ---------------- 输入 ----------------
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
+        if self.paste_mode:
+            x, y = self._scene_xy(pos)
+            if event.button() == Qt.LeftButton:
+                self.pastePlaceRequested.emit(x, y, event.modifiers())
+                event.accept()
+                return
+            if event.button() == Qt.RightButton:
+                self.pasteCancelRequested.emit()
+                event.accept()
+                return
         if event.button() == Qt.MiddleButton:
             self._panning = True
             self._last_pos = pos
@@ -258,6 +273,10 @@ class MapView(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
+        if self.paste_mode:
+            self.pasteMoveRequested.emit(*self._scene_xy(pos))
+            event.accept()
+            return
         if self._panning and self._last_pos is not None:
             delta = pos - self._last_pos
             self._last_pos = pos
@@ -383,6 +402,10 @@ class MapView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.paste_mode:
+            self.pasteCancelRequested.emit()
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape and self.object_mode != "brush":
             self._obj_tool_drag = False
             self.objectToolCancelled.emit()

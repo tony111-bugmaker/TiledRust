@@ -1,15 +1,25 @@
 {
   "source": "Rusted Warfare · <游戏目录1.15>",
-  "count": 160,
+  "count": 170,
   "units": [
     {
-      "raw": "NULL",
-      "cn": "",
-      "en": "",
-      "key": "",
-      "group": "机甲",
-      "folder": "mechs_small",
-      "hidden": true,
+      "raw": "AntiNukeLaucher",
+      "cn": "反核防御",
+      "en": "Anti-Nuke Defence",
+      "key": "AntiNukeLaucher",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "NukeLaucher",
+      "cn": "核弹发射井",
+      "en": "Nuke Launcher",
+      "key": "NukeLaucher",
+      "group": "建筑",
+      "folder": "",
+      "hidden": false,
       "replace": ""
     },
     {
@@ -37,7 +47,7 @@
       "cn": "空军基地",
       "en": "Air Factory",
       "key": "airFactory",
-      "group": "建筑",
+      "group": "工厂",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -83,11 +93,31 @@
       "replace": ""
     },
     {
+      "raw": "antiAirTurretT2",
+      "cn": "T2 - 防空炮塔",
+      "en": "Anti-air T2",
+      "key": "antiAirTurretT2",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "antiAirTurretT3",
+      "cn": "T3 - 防空炮塔",
+      "en": "Anti-air T3",
+      "key": "antiAirTurretT3",
+      "group": "防御",
+      "folder": "turrets",
+      "hidden": false,
+      "replace": ""
+    },
+    {
       "raw": "antiNukeLaucher",
       "cn": "反核防御",
       "en": "Anti-Nuke Defence",
       "key": "AntiNukeLaucher",
-      "group": "核武器",
+      "group": "建筑",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -97,7 +127,7 @@
       "cn": "反核防御",
       "en": "Anti-Nuke Defence",
       "key": "AntiNukeLaucher",
-      "group": "核武器",
+      "group": "建筑",
       "folder": "nukes",
       "hidden": false,
       "replace": "AntiNukeLaucher"
@@ -144,7 +174,7 @@
     },
     {
       "raw": "bugBee",
-      "cn": "蜜蜂虫",
+      "cn": "自爆蜜蜂",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -154,7 +184,7 @@
     },
     {
       "raw": "bugExtractor",
-      "cn": "虫族采集器",
+      "cn": "资源抽取虫",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -164,7 +194,7 @@
     },
     {
       "raw": "bugExtractorT2",
-      "cn": "虫族采集器 T2",
+      "cn": "资源抽取虫 T2",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -174,7 +204,7 @@
     },
     {
       "raw": "bugFly",
-      "cn": "飞行虫",
+      "cn": "建造飞虫",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -184,7 +214,7 @@
     },
     {
       "raw": "bugGenerator",
-      "cn": "虫族发电站",
+      "cn": "虫族资源制造仪",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -194,7 +224,7 @@
     },
     {
       "raw": "bugGeneratorN",
-      "cn": "虫族发电站（中型）",
+      "cn": "资源生产虫",
       "en": "Generator",
       "key": "",
       "group": "虫族",
@@ -204,7 +234,7 @@
     },
     {
       "raw": "bugGeneratorNT2",
-      "cn": "虫族发电站（中型）T2",
+      "cn": "资源生产虫 T2",
       "en": "Generator",
       "key": "",
       "group": "虫族",
@@ -214,7 +244,7 @@
     },
     {
       "raw": "bugGeneratorT2",
-      "cn": "虫族发电站 T2",
+      "cn": "虫族资源制造仪 T2",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -224,7 +254,7 @@
     },
     {
       "raw": "bugMelee",
-      "cn": "虫族近战虫",
+      "cn": "噬咬虫(中)",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -234,7 +264,7 @@
     },
     {
       "raw": "bugMeleeLarge",
-      "cn": "大型近战虫",
+      "cn": "噬咬虫(大)",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -244,7 +274,7 @@
     },
     {
       "raw": "bugMeleeSmall",
-      "cn": "小型近战虫",
+      "cn": "噬咬虫(小)",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -254,7 +284,7 @@
     },
     {
       "raw": "bugMeleeT31",
-      "cn": "杀手虫 Alpha",
+      "cn": "杀手阿尔法",
       "en": "Killer alpha",
       "key": "",
       "group": "虫族",
@@ -274,7 +304,7 @@
     },
     {
       "raw": "bugPickup",
-      "cn": "虫族拾取物",
+      "cn": "运输飞行虫",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -284,7 +314,7 @@
     },
     {
       "raw": "bugRanged",
-      "cn": "虫族远程虫",
+      "cn": "远程攻击虫",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -294,7 +324,7 @@
     },
     {
       "raw": "bugRangedT2",
-      "cn": "虫族远程虫 T2",
+      "cn": "T2喷射虫(超级虫)",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -304,7 +334,7 @@
     },
     {
       "raw": "bugSpore",
-      "cn": "孢子虫",
+      "cn": "建造虫",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -314,7 +344,7 @@
     },
     {
       "raw": "bugTurret",
-      "cn": "虫族炮塔",
+      "cn": "炮塔虫",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -324,7 +354,7 @@
     },
     {
       "raw": "bugWasp",
-      "cn": "黄蜂虫",
+      "cn": "远程攻击飞行虫",
       "en": "",
       "key": "",
       "group": "虫族",
@@ -337,7 +367,7 @@
       "cn": "建造者",
       "en": "Builder",
       "key": "builder",
-      "group": "建筑",
+      "group": "陆军",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -587,7 +617,7 @@
       "cn": "资金箱子",
       "en": "Credits crate",
       "key": "creditsCrates",
-      "group": "经济",
+      "group": "其他",
       "folder": "resource_deposits",
       "hidden": false,
       "replace": ""
@@ -597,7 +627,7 @@
       "cn": "水晶",
       "en": "Crystal",
       "key": "crystalResource",
-      "group": "经济",
+      "group": "其他",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -607,18 +637,8 @@
       "cn": "中型晶体",
       "en": "",
       "key": "",
-      "group": "经济",
+      "group": "其他",
       "folder": "resource_deposits",
-      "hidden": false,
-      "replace": ""
-    },
-    {
-      "raw": "custom_tank",
-      "cn": "测试坦克",
-      "en": "Test Tank",
-      "key": "",
-      "group": "陆军",
-      "folder": "test_tank",
       "hidden": false,
       "replace": ""
     },
@@ -630,16 +650,6 @@
       "group": "空军",
       "folder": "",
       "hidden": false,
-      "replace": ""
-    },
-    {
-      "raw": "example_faction_picker",
-      "cn": "阵营选择器（开发用）",
-      "en": "Faction Picker",
-      "key": "",
-      "group": "其他",
-      "folder": "miscellaneous",
-      "hidden": true,
       "replace": ""
     },
     {
@@ -667,7 +677,7 @@
       "cn": "实验悬浮型气垫船",
       "en": "Support Hovertank",
       "key": "experimentalGunship",
-      "group": "空军",
+      "group": "陆军",
       "folder": "experimental_gunship",
       "hidden": false,
       "replace": ""
@@ -677,7 +687,7 @@
       "cn": "实验悬浮型气垫船",
       "en": "",
       "key": "experimentalGunshipLanded",
-      "group": "空军",
+      "group": "陆军",
       "folder": "experimental_gunship",
       "hidden": true,
       "replace": ""
@@ -697,7 +707,7 @@
       "cn": "实验工厂",
       "en": "Experimental Factory",
       "key": "experimentalLandFactory",
-      "group": "建筑",
+      "group": "工厂",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -727,7 +737,7 @@
       "cn": "资源抽取器",
       "en": "Extractor",
       "key": "extractor",
-      "group": "经济",
+      "group": "建筑",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -737,7 +747,7 @@
       "cn": "资源抽取器",
       "en": "Extractor",
       "key": "extractor",
-      "group": "经济",
+      "group": "建筑",
       "folder": "extractor",
       "hidden": false,
       "replace": "extractor"
@@ -747,7 +757,7 @@
       "cn": "资源抽取器",
       "en": "Extractor",
       "key": "extractor",
-      "group": "经济",
+      "group": "建筑",
       "folder": "extractor",
       "hidden": false,
       "replace": ""
@@ -757,7 +767,7 @@
       "cn": "资源抽取器",
       "en": "Extractor",
       "key": "extractor",
-      "group": "经济",
+      "group": "建筑",
       "folder": "extractor",
       "hidden": false,
       "replace": ""
@@ -767,7 +777,7 @@
       "cn": "资源抽取器",
       "en": "Extractor",
       "key": "extractor",
-      "group": "经济",
+      "group": "建筑",
       "folder": "extractor",
       "hidden": false,
       "replace": ""
@@ -777,7 +787,7 @@
       "cn": "资源抽取器",
       "en": "Extractor",
       "key": "extractor",
-      "group": "经济",
+      "group": "建筑",
       "folder": "extractor",
       "hidden": false,
       "replace": ""
@@ -787,7 +797,7 @@
       "cn": "资源制造仪",
       "en": "Fabricator",
       "key": "fabricator",
-      "group": "经济",
+      "group": "建筑",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -797,7 +807,7 @@
       "cn": "资源制造仪",
       "en": "Fabricator",
       "key": "fabricator",
-      "group": "经济",
+      "group": "建筑",
       "folder": "fabricator",
       "hidden": false,
       "replace": "fabricator"
@@ -807,7 +817,7 @@
       "cn": "资源制造仪",
       "en": "Fabricator",
       "key": "fabricator",
-      "group": "经济",
+      "group": "建筑",
       "folder": "fabricator",
       "hidden": false,
       "replace": "NONE"
@@ -817,7 +827,7 @@
       "cn": "资源制造仪",
       "en": "Fabricator",
       "key": "fabricator",
-      "group": "经济",
+      "group": "建筑",
       "folder": "fabricator",
       "hidden": false,
       "replace": "NONE"
@@ -830,16 +840,6 @@
       "group": "虫族",
       "folder": "fire_bee",
       "hidden": false,
-      "replace": ""
-    },
-    {
-      "raw": "flare_10s",
-      "cn": "信号弹",
-      "en": "Flare",
-      "key": "",
-      "group": "其他",
-      "folder": "miscellaneous",
-      "hidden": true,
       "replace": ""
     },
     {
@@ -967,7 +967,7 @@
       "cn": "登陆艇",
       "en": "Landing Craft",
       "key": "hovercraft",
-      "group": "海军",
+      "group": "陆军",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -977,7 +977,7 @@
       "cn": "实验室",
       "en": "Laboratory",
       "key": "",
-      "group": "建筑",
+      "group": "其他",
       "folder": "laboratory",
       "hidden": false,
       "replace": ""
@@ -997,7 +997,7 @@
       "cn": "陆军工厂",
       "en": "Land Factory",
       "key": "landFactory",
-      "group": "建筑",
+      "group": "工厂",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -1097,7 +1097,7 @@
       "cn": "机械工厂",
       "en": "Mech Factory",
       "key": "mechFactory",
-      "group": "机甲",
+      "group": "工厂",
       "folder": "mech_factory",
       "hidden": false,
       "replace": ""
@@ -1107,7 +1107,7 @@
       "cn": "T2 - 机械工厂",
       "en": "Mech Factory T2",
       "key": "mechFactoryT2",
-      "group": "机甲",
+      "group": "工厂",
       "folder": "mech_factory",
       "hidden": false,
       "replace": ""
@@ -1124,22 +1124,22 @@
     },
     {
       "raw": "mechFlyingLanded",
-      "cn": "",
+      "cn": "飞行机甲(陆地)",
       "en": "",
       "key": "",
       "group": "机甲",
       "folder": "mechs_large",
-      "hidden": true,
+      "hidden": false,
       "replace": ""
     },
     {
       "raw": "mechFlyingTakeoff",
-      "cn": "",
+      "cn": "飞行机甲(空中)",
       "en": "",
       "key": "",
       "group": "机甲",
       "folder": "mechs_large",
-      "hidden": true,
+      "hidden": false,
       "replace": ""
     },
     {
@@ -1203,12 +1203,32 @@
       "replace": ""
     },
     {
+      "raw": "megaTank",
+      "cn": "超级坦克",
+      "en": "Mega Tank",
+      "key": "megaTank",
+      "group": "陆军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
       "raw": "missileAirship",
       "cn": "导弹飞艇",
       "en": "Missile Airship",
       "key": "missileAirship",
       "group": "空军",
       "folder": "missile_airship",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "missileShip",
+      "cn": "导弹舰",
+      "en": "Missile Ship",
+      "key": "missileShip",
+      "group": "海军",
+      "folder": "",
       "hidden": false,
       "replace": ""
     },
@@ -1220,16 +1240,6 @@
       "group": "陆军",
       "folder": "missile_tank",
       "hidden": false,
-      "replace": ""
-    },
-    {
-      "raw": "missing",
-      "cn": "",
-      "en": "",
-      "key": "",
-      "group": "其他",
-      "folder": "missing_unit",
-      "hidden": true,
       "replace": ""
     },
     {
@@ -1374,7 +1384,7 @@
     },
     {
       "raw": "modularSpider_nonEmpty",
-      "cn": "",
+      "cn": "模块化蜘蛛(已装模块)",
       "en": "",
       "key": "",
       "group": "机甲",
@@ -1434,7 +1444,7 @@
     },
     {
       "raw": "nautilusSubmarine",
-      "cn": "鹦鹉螺号",
+      "cn": "鹦鹉螺号(水下)",
       "en": "Nautilus",
       "key": "nautilusSubmarine",
       "group": "海军",
@@ -1444,22 +1454,22 @@
     },
     {
       "raw": "nautilusSubmarineLand",
-      "cn": "",
+      "cn": "鹦鹉螺号(陆地)",
       "en": "",
       "key": "",
       "group": "海军",
       "folder": "nautilus",
-      "hidden": true,
+      "hidden": false,
       "replace": ""
     },
     {
       "raw": "nautilusSubmarineSurface",
-      "cn": "",
+      "cn": "鹦鹉螺号(水面)",
       "en": "",
       "key": "",
       "group": "海军",
       "folder": "nautilus",
-      "hidden": true,
+      "hidden": false,
       "replace": ""
     },
     {
@@ -1467,7 +1477,7 @@
       "cn": "核弹发射井",
       "en": "Nuke Launcher",
       "key": "NukeLaucher",
-      "group": "核武器",
+      "group": "建筑",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -1477,7 +1487,7 @@
       "cn": "核弹发射井",
       "en": "Nuke Launcher",
       "key": "NukeLaucher",
-      "group": "核武器",
+      "group": "建筑",
       "folder": "nukes",
       "hidden": false,
       "replace": "NukeLaucher"
@@ -1527,7 +1537,7 @@
       "cn": "侦察机器人",
       "en": "Scout bot",
       "key": "",
-      "group": "机甲",
+      "group": "海军",
       "folder": "nautilus",
       "hidden": false,
       "replace": ""
@@ -1537,7 +1547,7 @@
       "cn": "两栖侦察机器人",
       "en": "",
       "key": "",
-      "group": "机甲",
+      "group": "海军",
       "folder": "nautilus",
       "hidden": false,
       "replace": ""
@@ -1567,7 +1577,7 @@
       "cn": "海军基地",
       "en": "Sea Factory",
       "key": "seaFactory",
-      "group": "建筑",
+      "group": "工厂",
       "folder": "",
       "hidden": false,
       "replace": ""
@@ -1583,6 +1593,16 @@
       "replace": ""
     },
     {
+      "raw": "supplyDepot",
+      "cn": "供应站",
+      "en": "Supply Depot",
+      "key": "supplyDepot",
+      "group": "其他",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
       "raw": "tank",
       "cn": "坦克",
       "en": "Tank",
@@ -1593,10 +1613,90 @@
       "replace": ""
     },
     {
+      "raw": "tankDestroyer",
+      "cn": "坦克杀手",
+      "en": "Unnamed Tank",
+      "key": "tankDestroyer",
+      "group": "陆军",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
       "raw": "turret",
       "cn": "炮塔",
       "en": "Turret",
       "key": "turret",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "turretT2",
+      "cn": "机枪 T2",
+      "en": "Turret T2",
+      "key": "turretT2",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "turretT3",
+      "cn": "重机枪塔 T3",
+      "en": "Turret T3",
+      "key": "turretT3",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "turret_artillery",
+      "cn": "火炮",
+      "en": "Artillery",
+      "key": "turret_artillery",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "turret_artilleryT2",
+      "cn": "火炮 T2",
+      "en": "Artillery T2",
+      "key": "turret_artilleryT2",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "turret_flamethrower",
+      "cn": "火焰喷射器",
+      "en": "Flamethrower",
+      "key": "turret_flamethrower",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "turret_lightning",
+      "cn": "闪电炮塔",
+      "en": "Lightning",
+      "key": "turret_lightning",
+      "group": "防御",
+      "folder": "",
+      "hidden": false,
+      "replace": ""
+    },
+    {
+      "raw": "turret_lightningT2",
+      "cn": "闪电炮塔 T2",
+      "en": "Lightning T2",
+      "key": "turret_lightningT2",
       "group": "防御",
       "folder": "",
       "hidden": false,

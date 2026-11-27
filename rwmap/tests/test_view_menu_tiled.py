@@ -64,10 +64,10 @@ class ViewMenuTestBase(unittest.TestCase):
 
 
 class TestMenuStructure(ViewMenuTestBase):
-    def test_five_menus_unchanged(self):
+    def test_four_menus_unchanged(self):
         self.assertEqual(
             [a.text() for a in self.w.menuBar().actions()],
-            ["文件", "编辑", "视图", "地图", "工具", "设置"])
+            ["文件", "编辑", "视图", "地图", "设置"])
 
     def test_view_menu_items(self):
         texts = [a.text() for a in self.view_menu.actions()

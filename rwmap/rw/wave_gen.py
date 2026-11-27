@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..document.properties import (
@@ -126,6 +127,110 @@ def next_wave_name(doc) -> str:
         candidate += 1
         name = f"第{_cn_number(candidate)}波"
     return name
+
+
+def _chain_order(nodes: list[WaveNode]) -> list[WaveNode]:
+    """按 rwmap_wave_next 拓扑排序：没有任何前置触发的节点就是第一波。
+
+    断链 / 成环时「尽力而为」：走不到的节点按原顺序补在末尾，保证删除后
+    仍能把所有波次编号排出来，不会静默丢波次。
+    """
+    by_name = {str(getattr(n.obj, "name", "") or "").strip().lower(): n
+               for n in nodes if str(getattr(n.obj, "name", "") or "").strip()}
+    target: dict[int, WaveNode | None] = {}
+    indeg: dict[int, int] = {n.key: 0 for n in nodes}
+    for n in nodes:
+        hit = None
+        for ref in n.next_refs:
+            cand = _resolve(ref, nodes, by_name)
+            if cand is not None and cand.key != n.key:
+                hit = cand
+                break
+        target[n.key] = hit
+        if hit is not None:
+            indeg[hit.key] += 1
+
+    ordered: list[WaveNode] = []
+    seen: set[int] = set()
+    for start in [n for n in nodes if not indeg[n.key]]:
+        cur: WaveNode | None = start
+        while cur is not None and cur.key not in seen:
+            seen.add(cur.key)
+            ordered.append(cur)
+            cur = target.get(cur.key)
+    for n in nodes:
+        if n.key not in seen:
+            ordered.append(n)
+            seen.add(n.key)
+    return ordered
+
+
+def repair_wave_chain(doc, deleted: set[str],
+                      deleted_next: dict[str, str]) -> int:
+    """删除波次节点后接回断掉的链：前驱的 next 改为被删节点的后继。
+
+    ``deleted`` 是被删节点的稳定标识（id / object_id / name），
+    ``deleted_next`` 记录它们删除前指向的下一波标识。返回修复的引用条数。
+    """
+    if not deleted:
+        return 0
+    fixed = 0
+    for n in collect_wave_nodes(doc):
+        refs = n.next_refs
+        new_refs: list[str] = []
+        for ref in refs:
+            if ref not in deleted:
+                new_refs.append(ref)
+                continue
+            nxt = deleted_next.get(ref, "")
+            if nxt and nxt not in deleted and nxt not in new_refs:
+                new_refs.append(nxt)
+                fixed += 1
+        if new_refs != refs:
+            n.obj.properties.set(WAVE_NEXT_PROPERTY, ", ".join(new_refs))
+    return fixed
+
+
+def reorder_wave_nodes(doc) -> int:
+    """按链条顺序重排「第N波」编号：没有前置触发器的节点排第一波。
+
+    只重排形如「第N波 / 第N 波」的名字，「最终波」这类自定义名原样保留。
+    改名会同步修正引用它的 rwmap_wave_next / rwmap_wave_dispatch_wave，
+    避免保存后链条因改名而断裂。返回实际改名的节点数。
+    """
+    nodes = collect_wave_nodes(doc)
+    if len(nodes) < 2:
+        return 0
+    pattern = re.compile(r"^第\s*(?:\d+|[一二三四五六七八九十]+)\s*波$")
+    renames: dict[str, str] = {}
+    pending: list[tuple[WaveNode, str]] = []
+    for idx, node in enumerate(_chain_order(nodes), start=1):
+        old = node.name
+        if not pattern.match(old):
+            continue
+        new = f"第{_cn_number(idx)}波"
+        if new != old:
+            renames[old] = new
+            pending.append((node, new))
+    if not pending:
+        return 0
+
+    # 先改引用再改名字，期间按旧名 → 新名映射
+    for node in nodes:
+        refs = node.next_refs
+        new_refs = [renames.get(ref, ref) for ref in refs]
+        if new_refs != refs:
+            node.obj.properties.set(WAVE_NEXT_PROPERTY, ", ".join(new_refs))
+        props = getattr(node.obj, "properties", None)
+        values = getattr(props, "values", {}) or {}
+        src = str(values.get(WAVE_DISPATCH_WAVE_PROPERTY, "") or "").strip()
+        if src in renames:
+            node.obj.properties.set(WAVE_DISPATCH_WAVE_PROPERTY, renames[src])
+    for node, new in pending:
+        node.obj.name = new
+        node.obj.properties.set(WAVE_NAME_PROPERTY, new)
+        # 节点对象改名后，以 name 作标识的节点需要同步引用自身的地方
+    return len(pending)
 
 
 def is_wave_node(obj) -> bool:
@@ -310,13 +415,21 @@ def _parse_units(raw: str) -> str:
     parts = _split_refs(text)
     out: list[str] = []
     for part in parts:
+        part = part.strip()
+        if not part:
+            continue
         if "*" in part:
             name, _, count = part.rpartition("*")
             name, count = name.strip(), count.strip()
             if name and count:
                 out.append(f"{count} {name}")
                 continue
-        out.append(part)
+        # 游戏要求每段都带数量；裸单位名（如 bugMeleeT31）会被判
+        # "Unknown wave format"，必须补成 "1 bugMeleeT31"。
+        if re.match(r"^\d+\s+", part):
+            out.append(part)
+        else:
+            out.append(f"1 {part}")
     return ",".join(out)
 
 

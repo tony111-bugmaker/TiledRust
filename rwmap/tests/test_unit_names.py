@@ -34,6 +34,51 @@ class UnitNameMapTest(TestCase):
         )
 
 
+class UnitGroupTest(TestCase):
+    """9 类分组：工厂 / 建筑 / 虫族等重新归类后不能回退。"""
+
+    def test_group_order(self):
+        self.assertEqual(unit_names.GROUPS, (
+            "陆军", "海军", "空军", "机甲", "工厂",
+            "防御", "建筑", "虫族", "其他"))
+
+    def test_every_catalog_group_is_known(self):
+        for row in unit_names.catalog(include_hidden=True):
+            self.assertIn(row.get("group"), unit_names.GROUPS, row["raw"])
+
+    def test_no_retired_groups(self):
+        groups = {r.get("group") for r in unit_names.catalog(include_hidden=True)}
+        self.assertNotIn("经济", groups)
+        self.assertNotIn("核武器", groups)
+
+    def test_regrouped_units(self):
+        expected = {
+            # 工厂 = 能造单位的建筑（虫族除外）
+            "landFactory": "工厂", "airFactory": "工厂", "seaFactory": "工厂",
+            "mechFactory": "工厂", "mechFactoryT2": "工厂",
+            "experimentalLandFactory": "工厂",
+            # 核武并入建筑；经济类拆分
+            "NukeLaucher": "建筑", "antiNukeLaucher": "建筑",
+            "nukeLauncherC": "建筑", "extractor": "建筑", "fabricator": "建筑",
+            "laboratory": "其他", "crystalResource": "其他",
+            "creditsCrates": "其他", "supplyDepot": "其他",
+            # 虫族全收，火蜂算实验单位
+            "fireBee": "虫族", "bugSpore": "虫族", "bugTurret": "虫族",
+            # wiki 争议条目
+            "builder": "陆军", "hovercraft": "陆军",
+            "experimentalGunship": "陆军",
+            "robotCrab": "海军", "robotCrabWater": "海军",
+            "nautilusSubmarine": "海军",
+            # 名字含 ship 的空军别被关键字吞进海军
+            "dropship": "空军", "experimentalDropship": "空军",
+            "gunShip": "空军", "airShip": "空军",
+            # 多形态跟随本体
+            "mechFlyingLanded": "机甲", "mechFlyingTakeoff": "机甲",
+        }
+        for raw, group in expected.items():
+            self.assertEqual(unit_names.group_of(raw), group, raw)
+
+
 class EqualChanceTest(TestCase):
     def test_equal_chances_formula(self):
         self.assertEqual(unit_names.equal_chances(2), [0.5, 1.0])
@@ -258,7 +303,8 @@ class UnitPickerTest(TestCase):
 
     def test_catalog_groups_and_hidden(self):
         groups = {r["group"] for r in unit_names.catalog()}
-        for name in ("陆军", "机甲", "空军", "海军", "防御", "经济", "虫族"):
+        for name in ("陆军", "海军", "空军", "机甲", "工厂",
+                     "防御", "建筑", "虫族", "其他"):
             self.assertIn(name, groups)
         # 战役变体默认隐藏，切到「显示内部变体」才出现
         self.assertTrue(unit_names.is_hidden("c_tank"))
@@ -269,7 +315,7 @@ class UnitPickerTest(TestCase):
 
     def test_cn_names_come_from_official_translation(self):
         self.assertEqual(unit_names.to_cn("mechGun"), "基础机甲")
-        self.assertEqual(unit_names.to_cn("bugSpore"), "孢子虫")
+        self.assertEqual(unit_names.to_cn("bugSpore"), "建造虫")  # wiki 译名
         self.assertEqual(unit_names.to_raw("等离子机甲"), "mechLaser")
         # 官方译名覆盖内置兜底（火炮 -> 自行火炮）
         self.assertEqual(unit_names.to_cn("artillery"), "自行火炮")
@@ -606,8 +652,9 @@ class WaveUnitsTextTest(TestCase):
                          [("heavyTank", 6), ("heavyTank", 2)])
         self.assertEqual(u.parse_wave_units("DropShip,6 heavyTank"),
                          [(u.to_raw("DropShip"), 1), ("heavyTank", 6)])
+        # 游戏的 survivalWaves 不接受裸单位名，数量为 1 也必须写出 "1 "
         self.assertEqual(u.format_wave_units(
-            [("heavyTank", 6), ("bugMelee", 1)]), "6 heavyTank,bugMelee")
+            [("heavyTank", 6), ("bugMelee", 1)]), "6 heavyTank,1 bugMelee")
 
     def test_round_trip(self):
         from rwmap.rw import unit_names as u
@@ -707,6 +754,17 @@ class UnknownUnitCheckTest(TestCase):
                      "tank(spawnChance=0.5)"):
             self.assertEqual(unit_names.unknown_units(text), [], text)
 
+    def test_dev_placeholder_units_never_leak_into_maps(self):
+        """开发 / 测试占位物不能出现在图鉴或校验通过：游戏加载会直接报错。"""
+        from rwmap.rw import unit_names as u
+        visible = {r["raw"] for r in u.catalog()}
+        all_rows = {r["raw"] for r in u.catalog(include_hidden=True)}
+        for name in u.NON_GAME_UNITS:
+            self.assertNotIn(name, visible, name)
+            self.assertNotIn(name, all_rows, name)
+            self.assertFalse(u.is_known_unit(name), name)
+            self.assertEqual(u.unknown_units(f"6 {name}"), [name])
+
     def test_unknown_units_various_formats(self):
         self.assertEqual(unit_names.unknown_units("lecT31*100"), ["lecT31"])
         self.assertEqual(unit_names.unknown_units("6 lecT31"), ["lecT31"])
@@ -719,6 +777,80 @@ class UnknownUnitCheckTest(TestCase):
     def test_case_insensitive(self):
         self.assertEqual(unit_names.unknown_units("HEAVYTANK*3"), [])
         self.assertFalse(unit_names.is_known_unit("nonexistentUnit"))
+
+    def test_morph_unit_forms_visible_and_named(self):
+        """多形态单位（鹦鹉螺号 / 飞行机甲）各形态可选、命名带形态后缀、分组随本体。"""
+        from rwmap.rw import unit_names as u
+        visible = {r["raw"]: r for r in u.catalog()}
+        expect = {
+            "nautilusSubmarine": ("鹦鹉螺号(水下)", "海军"),
+            "nautilusSubmarineSurface": ("鹦鹉螺号(水面)", "海军"),
+            "nautilusSubmarineLand": ("鹦鹉螺号(陆地)", "海军"),
+            "mechFlyingLanded": ("飞行机甲(陆地)", "机甲"),
+            "mechFlyingTakeoff": ("飞行机甲(空中)", "机甲"),
+        }
+        for raw, (cn, group) in expect.items():
+            self.assertIn(raw, visible, raw)
+            self.assertEqual(visible[raw]["cn"], cn, raw)
+            self.assertEqual(visible[raw]["group"], group, raw)
+            self.assertEqual(u.to_cn(raw), cn)
+
+    def test_null_and_missing_not_units(self):
+        """空槽位 / 缺失占位符不是单位，已从目录移除且不能通过校验。"""
+        from rwmap.rw import unit_names as u
+        all_rows = {r["raw"] for r in u.catalog(include_hidden=True)}
+        for name in ("NULL", "missing"):
+            self.assertNotIn(name, all_rows, name)
+            self.assertFalse(u.is_known_unit(name), name)
+            self.assertEqual(u.unknown_units(f"1 {name}"), [name])
+
+    def test_jar_builtin_units_in_catalog(self):
+        """游戏内置（无 ini / 无图集 tile）的单位必须在目录里且能通过校验。
+
+        这些经典单位（T2/T3 炮塔、超级坦克、导弹舰、核弹井等）编译在
+        game-lib.jar 里，只在翻译文件 + 帮助页出现。生成脚本曾只扫 ini/tsx，
+        导致它们整批漏掉，用户写了正确单位名反而被判「无效」。
+        """
+        from rwmap.rw import unit_names as u
+        builtin = ("megaTank", "missileShip", "tankDestroyer", "supplyDepot",
+                   "turretT2", "turretT3", "turret_artillery",
+                   "turret_flamethrower", "antiAirTurretT2", "antiAirTurretT3",
+                   "NukeLaucher", "AntiNukeLaucher")
+        visible = {r["raw"] for r in u.catalog()}
+        for name in builtin:
+            self.assertIn(name, visible, name)
+            self.assertTrue(u.is_known_unit(name), name)
+        self.assertEqual(u.unknown_units("2 megaTank, 1 missileShip"), [])
+
+    def test_bug_unit_cn_follows_chinese_wiki(self):
+        """虫族游戏无官方简中名，译名锁定为中文铁锈百科（rustedwarfare.org）。"""
+        from rwmap.rw import unit_names as u
+        wiki_cn = {
+            "bugMelee": "噬咬虫(中)",
+            "bugMeleeSmall": "噬咬虫(小)",
+            "bugMeleeLarge": "噬咬虫(大)",
+            "bugMeleeT31": "杀手阿尔法",
+            "bugRanged": "远程攻击虫",
+            "bugRangedT2": "T2喷射虫(超级虫)",
+            "bugSpore": "建造虫",
+            "bugFly": "建造飞虫",
+            "bugPickup": "运输飞行虫",
+            "bugWasp": "远程攻击飞行虫",
+            "bugBee": "自爆蜜蜂",
+            "bugNest": "虫巢",
+            "bugTurret": "炮塔虫",
+            "bugGenerator": "虫族资源制造仪",
+            "bugGeneratorT2": "虫族资源制造仪 T2",
+            "bugGeneratorN": "资源生产虫",
+            "bugGeneratorNT2": "资源生产虫 T2",
+            "bugExtractor": "资源抽取虫",
+            "bugExtractorT2": "资源抽取虫 T2",
+        }
+        for raw, cn in wiki_cn.items():
+            self.assertEqual(u.to_cn(raw), cn, raw)
+        # 游戏已有官方简中名的不wiki化
+        self.assertEqual(u.to_cn("ladyBug"), "瓢虫")
+        self.assertEqual(u.to_cn("fireBee"), "火蜂战机")
 
 
 if __name__ == "__main__":

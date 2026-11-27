@@ -65,9 +65,18 @@ def _load_catalog() -> list[dict]:
 CATALOG: list[dict] = _load_catalog()
 CATALOG_BY_RAW: dict[str, dict] = {r["raw"]: r for r in CATALOG}
 
-# 界面分组顺序
-GROUPS: tuple[str, ...] = ("陆军", "机甲", "空军", "海军", "防御",
-                           "经济", "建筑", "核武器", "虫族", "其他")
+# 游戏资源扫描带进来的开发 / 测试占位物：游戏本身不认这些内部名。
+# 写进刷兵列表会让 Rusted Warfare 报 "Unknown wave format ..." 直接打不开地图，
+# 所以既不能出现在选择器里（哪怕勾了「显示内部变体」），也不能通过单位名校验。
+NON_GAME_UNITS: frozenset[str] = frozenset({
+    "custom_tank",             # 游戏自带 test_tank 资源扫出来的测试车
+    "example_faction_picker",  # 开发用阵营选择器
+    "flare_10s",               # 杂项信号弹 / 特效物体，不是可刷单位
+})
+
+# 界面分组顺序（与 config/unit_names.json、docs 权威清单保持一致）
+GROUPS: tuple[str, ...] = ("陆军", "海军", "空军", "机甲", "工厂",
+                           "防御", "建筑", "虫族", "其他")
 
 # raw -> 中文：兜底表打底，游戏官方翻译覆盖
 RAW_TO_CN: dict[str, str] = dict(_BUILTIN_CN)
@@ -99,7 +108,9 @@ def group_of(raw: str) -> str:
 
 def catalog(include_hidden: bool = False) -> list[dict]:
     """按分组顺序返回单位条目（默认只给玩家能用的）。"""
-    rows = [r for r in CATALOG if include_hidden or not r.get("hidden")]
+    rows = [r for r in CATALOG
+            if r["raw"].lower() not in NON_GAME_UNITS
+            and (include_hidden or not r.get("hidden"))]
     order = {g: i for i, g in enumerate(GROUPS)}
     return sorted(rows, key=lambda r: (order.get(r.get("group") or "其他", 99),
                                        r["raw"].lower()))
@@ -163,6 +174,8 @@ def is_known_unit(raw: str) -> bool:
     """
     name = (raw or "").strip()
     if not name:
+        return False
+    if name.lower() in NON_GAME_UNITS:
         return False
     if name in CATALOG_BY_RAW:
         return True
@@ -316,9 +329,12 @@ def parse_wave_units(text: str) -> list[tuple[str, int]]:
 
 
 def format_wave_units(units: list[tuple[str, int]]) -> str:
-    """``[(raw, 数量)]`` -> ``6 heavyTank,2 bugMelee``（原版刷兵格式）。"""
-    return ",".join(raw if count <= 1 else f"{count} {raw}"
-                    for raw, count in units)
+    """``[(raw, 数量)]`` -> ``6 heavyTank,1 bugMelee``（原版刷兵格式）。
+
+    游戏要求**每段都带数量**：数量为 1 也要写 ``1 单位名``，裸单位名会报
+    ``Unknown wave format`` 让整张地图加载失败。
+    """
+    return ",".join(f"{max(1, count)} {raw}" for raw, count in units)
 
 
 # ---------------------------------------------------------------- 权重 / 数量

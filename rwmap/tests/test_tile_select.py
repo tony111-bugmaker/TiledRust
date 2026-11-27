@@ -49,6 +49,14 @@ class SelectionPureTest(unittest.TestCase):
         layer = make_layer([[1, 2, 3], [4, 5, 6]])
         self.assertEqual(read_selection(layer, (0, 0, 2, 2)), [[1, 2], [4, 5]])
 
+    def test_read_selection_out_of_bounds_is_empty(self):
+        """地图外拖框得到的越界选区读取时不能 IndexError，越界格当空格。"""
+        layer = make_layer([[1, 2, 3], [4, 5, 6]])
+        # 右/下越界曾直接抛 IndexError（用户崩溃堆栈的根因）。
+        self.assertEqual(read_selection(layer, (2, 1, 2, 2)), [[6, 0], [0, 0]])
+        # 负坐标起点曾静默绕回表尾读错瓦片，现在一律当空格。
+        self.assertEqual(read_selection(layer, (-1, -1, 2, 2)), [[0, 0], [0, 1]])
+
     def test_move_non_overlapping(self):
         layer = make_layer([[1, 1, 0, 0], [1, 1, 0, 0],
                             [0, 0, 0, 0], [0, 0, 0, 0]])
